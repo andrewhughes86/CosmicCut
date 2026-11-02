@@ -50,7 +50,7 @@ impl Default for Machine {
             travel_x: 2540.0,
             travel_y: 1397.0,
             table_x: 1270.0,
-            wire_y0: 12.7,
+            wire_y0: 0.0,
             table_radius: 609.6,
             wire_span: 1828.8,
             b_axis: true,
@@ -239,6 +239,6 @@ mod tests {
         assert_eq!(back.as_ref().ok(), Some(&m));
         assert!(m.apply(&json!({ "rapid": 0.0 })).is_err());
         assert_eq!(m.rapid, Machine::default().rapid);
-        assert_eq!(m.machine_xy(10.0, 12.7), (1280.0, 0.0));
+        assert_eq!(m.machine_xy(10.0, 0.0), (1280.0, 0.0));
     }
 }

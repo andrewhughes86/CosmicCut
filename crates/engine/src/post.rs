@@ -62,9 +62,9 @@ pub struct PostSettings {
     pub extension: String,
     /// End by going home to X0 Y0, over the top of the travel when the part is in the way.
     pub return_home: bool,
-    /// After the last cut, turn the table to this angle (degrees) before going home; None
-    /// leaves it where the last cut finished.
-    pub end_b: Option<f64>,
+    /// After the last cut, turn the table to B0 or B180, whichever is nearer, before going home;
+    /// false leaves it where the last cut finished.
+    pub square_b: bool,
 }
 
 impl Default for PostSettings {
@@ -91,7 +91,7 @@ impl Default for PostSettings {
             percent: true,
             extension: "ngc".into(),
             return_home: true,
-            end_b: Some(180.0),
+            square_b: true,
         }
     }
 }
@@ -122,11 +122,7 @@ pub const PARAMS: &[crate::Param] = {
         Param::optional("percent", Bool, "% at the start and end of the program"),
         Param::optional("extension", Str, "File extension programs are saved with"),
         Param::optional("return_home", Bool, "End by going home to X0 Y0, over the top when the part is in the way"),
-        Param::optional(
-            "end_b",
-            Number { min: -360.0, max: 360.0 },
-            "After the last cut, turn the table to this angle before going home (null: leave it)",
-        ),
+        Param::optional("square_b", Bool, "After the last cut, turn the table to B0 or B180, whichever is nearer"),
     ]
 };
 
@@ -153,7 +149,7 @@ impl PostSettings {
             "percent": self.percent,
             "extension": self.extension,
             "return_home": self.return_home,
-            "end_b": self.end_b,
+            "square_b": self.square_b,
         })
     }
 
@@ -188,6 +184,7 @@ impl PostSettings {
             ("comments", &mut s.comments),
             ("percent", &mut s.percent),
             ("return_home", &mut s.return_home),
+            ("square_b", &mut s.square_b),
         ] {
             if let Some(b) = flag(k)? {
                 *slot = b;
@@ -195,11 +192,6 @@ impl PostSettings {
         }
         if let Some(v) = params::opt_f64(p, "preheat", 0.0, 600.0)? {
             s.preheat = v;
-        }
-        match p.get("end_b") {
-            Some(Value::Null) => s.end_b = None,
-            Some(_) => s.end_b = params::opt_f64(p, "end_b", -360.0, 360.0)?,
-            None => {}
         }
         match p.get("decimals") {
             Some(Value::Null) => s.decimals = None,

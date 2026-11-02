@@ -164,7 +164,7 @@ the one last used is in front when CosmicCut opens.
    result): the start (safety) block and end code, the wire on and off codes and preheat,
    wire off between cuts and code between cuts (e.g. `M0`), a G0/G1 on every move line, the
    feed on every line, arcs, the turntable's axis letter, units, decimals, line numbers, comments,
-   `%` wrappers, the file extension, and the table turned to an angle after the last cut (B180 unless changed: wire off, out past where the foam swings, then the turn), the return home at the end (wire off, then up to the
+   `%` wrappers, the file extension, and the table turned square after the last cut (to B0 or B180, whichever is nearer: wire off, out past where the foam swings, then the turn), the return home at the end (wire off, then up to the
    top of the travel, across to X0 and down when the part is in the way, else straight to X0 Y0).
    Decimals you set are always written in full, trailing zeros too. In the code blocks `{units}` becomes G20 or G21, `{job}`
    the job's name and `{preheat}` the preheat seconds. The libraries are kept with your settings; a job keeps a copy of its machine and post, so
@@ -183,7 +183,9 @@ while simulating, so the turntable turns and the wire stays still.
 
 By default the post writes RS274/NGC for LinuxCNC-style controllers: `G17 G90 G91.1 G40 G49 G94`,
 `G20` or `G21`, `M3` and a 2 s preheat dwell, `G0`/`G1` with `X Y B`, `G2`/`G3` where the path
-follows circles, `M5 M2`; all of it can be changed in **Post processor**. Machine X = table X + u, machine Y = h − (wire height at Y0).
+follows circles, `M5 M2`; all of it can be changed in **Post processor**. Machine X = table X + u, machine Y = h − (wire height at Y0, 0 unless the machine says otherwise,
+so Y0 is the table top). The wire never goes below Y0: a part standing on the table is cut along
+the table top, not half a kerf under it.
 The table turns only with the wire clear of the foam: beside it, out past its turning circle,
 when the next pass starts on the same side (alternating passes always do), or above it when the
 wire has to cross over. After the last pass the part is cut free and the wire goes straight

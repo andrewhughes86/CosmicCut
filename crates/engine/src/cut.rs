@@ -376,10 +376,19 @@ fn profile_pass(
     let mut releases: Vec<WirePath> = Vec::new();
     // Holes before the outlines around them, so the part stays put while its insides are cut.
     let mut ordered: Vec<(usize, Vec<DVec2>)> = Vec::new();
+    // The wire goes no lower than it can reach (machine Y0); below that it runs level.
+    let floor = cx.machine.wire_y0;
+    let mut sunk = 0.0_f64;
     for shape in &wire_regions {
         for (depth, l) in shape.iter().enumerate() {
-            ordered.push((usize::from(depth == 0), l.clone()));
+            sunk = sunk.max(l.iter().map(|q| floor - q.y).fold(0.0, f64::max));
+            ordered.push((usize::from(depth == 0), above(l, floor)));
         }
+    }
+    if sunk > c.kerf + 1.0e-6 {
+        out.warnings.push(format!(
+            "the wire reaches no lower than Y0, so it runs level there, {sunk:.1} mm above the bottom of the outline"
+        ));
     }
     let lead_key = |l: &Vec<DVec2>| match lead {
         "right" => -l.iter().map(|q| q.x).fold(f64::NEG_INFINITY, f64::max),
@@ -514,6 +523,34 @@ fn profile_pass(
         out.release = Some(all);
     }
     Ok(())
+}
+
+/// A closed loop with everything below `floor` brought up to it: where an edge crosses the floor
+/// the loop meets it there, and runs along it until it comes back up.
+fn above(l: &[DVec2], floor: f64) -> Vec<DVec2> {
+    let mut out: Vec<DVec2> = Vec::with_capacity(l.len() + 4);
+    for (a, b) in l.iter().zip(l.iter().cycle().skip(1)) {
+        out.push(DVec2::new(a.x, a.y.max(floor)));
+        if (a.y - floor) * (b.y - floor) < 0.0 {
+            out.push(a.lerp(*b, (floor - a.y) / (b.y - a.y)));
+        }
+    }
+    out.dedup_by(|a, b| a.distance_squared(*b) < 1.0e-18);
+    // Points along the floor between two others on it add nothing.
+    let on = |q: &DVec2| (q.y - floor).abs() < 1.0e-9;
+    let n = out.len();
+    let keep: Vec<bool> = (0..n)
+        .map(|i| {
+            let prev = out.get((i + n - 1) % n);
+            let next = out.get((i + 1) % n);
+            !(out.get(i).is_some_and(on) && prev.is_some_and(on) && next.is_some_and(on))
+        })
+        .collect();
+    let mut kept: Vec<DVec2> = out.into_iter().zip(keep).filter_map(|(q, k)| k.then_some(q)).collect();
+    if kept.len() < 3 {
+        kept = l.to_vec();
+    }
+    kept
 }
 
 /// Splits a closed loop where it crosses the level `h` farthest left and farthest right: those
@@ -1035,6 +1072,29 @@ mod tests {
                 }),
         ];
         (Machine::default(), stock, shapes)
+    }
+
+    #[test]
+    fn the_wire_goes_no_lower_than_machine_y0() -> EngineResult<()> {
+        let (mut m, s, shapes) = job();
+        let cx = Context { machine: &m, stock: &s, shapes: &shapes, models: &[] };
+        // A part standing on the table, cut right through: the wire runs along the table top,
+        // not half a kerf under it.
+        let on_table = json!({ "shape": "shape.1", "kerf": 1.0, "bottom": "through", "anchor": "bottom_centre" });
+        let b = build(&cx, CutKind::Profile, &on_table)?;
+        let lowest = b.path.moves.iter().map(|q| q.to.h).fold(f64::INFINITY, f64::min);
+        assert!(lowest.abs() < 1e-9, "{lowest}");
+        assert!(b.warnings.is_empty(), "{:?}", b.warnings);
+        let along: Vec<_> = b.path.moves.iter().filter(|q| q.kind == MoveKind::Cut && q.to.h.abs() < 1e-9).collect();
+        assert!(along.len() >= 2, "the wire runs along the floor across the bottom");
+        // With Y0 higher than the part's bottom, it runs level at Y0 and says so.
+        m.wire_y0 = 20.0;
+        let cx = Context { machine: &m, stock: &s, shapes: &shapes, models: &[] };
+        let b = build(&cx, CutKind::Profile, &on_table)?;
+        let lowest = b.path.moves.iter().map(|q| q.to.h).fold(f64::INFINITY, f64::min);
+        assert!((lowest - 20.0).abs() < 1e-9, "{lowest}");
+        assert!(b.warnings.iter().any(|w| w.contains("no lower than Y0")), "{:?}", b.warnings);
+        Ok(())
     }
 
     #[test]

@@ -472,15 +472,36 @@ fn the_program_ends_clear_of_the_part_and_goes_home() {
     let text = run(&mut s, "post.gcode.preview", json!({}))["text"].as_str().unwrap_or_default().to_owned();
     let home = text.find("and return home)").unwrap_or(0);
     assert!(home > 0 && text[home..].contains("X0") && text[home..].contains("Y0"), "{text}");
-    // After the last cut the table turns to B180, clear of the foam, before going home.
-    let turn = text[home..].find("B180").map(|k| k + home).unwrap_or(0);
-    assert!(turn > home && text[turn..].contains("X0"), "{text}");
+    // After the last cut the table turns to B0 or B180, whichever is nearer, clear of the foam,
+    // before going home.
+    let from = prog.from(prog.home_at.unwrap_or(0)).b;
+    let nearer = if from.abs() <= (from - 180.0).abs() { 0.0 } else { 180.0 };
     let turned = prog.moves[prog.home_at.unwrap_or(0)..].iter().find(|(_, m)| m.kind == crate::wire::MoveKind::Rotate);
+    assert!(turned.is_some_and(|(_, m)| m.to.b == nearer), "from B{from}: {turned:?}");
     assert!(turned.is_some_and(|(_, m)| m.to.u.abs() >= s.job.stock.reach() || m.to.h > s.job.stock.top()));
+    let turn = text[home..].find(&format!("B{nearer}\n")).map(|k| k + home).unwrap_or(0);
+    assert!(turn > home && text[turn..].contains("X0"), "{text}");
+    // A table left nearer B180 turns to B180 instead.
+    for (last, want) in [(170.0, 180.0), (80.0, 0.0), (300.0, 180.0)] {
+        let mut cuts = s.job.cuts.clone();
+        for c in &mut cuts {
+            c.release = None;
+        }
+        if let Some(c) = cuts.last_mut() {
+            let at = c.path.end();
+            c.path.moves.push(crate::wire::Move {
+                kind: crate::wire::MoveKind::Rotate,
+                to: crate::wire::WirePos::new(at.u, at.h, last),
+                feed: 0.0,
+            });
+        }
+        let prog = crate::program::Program::build(&s.job.machine, &s.job.stock, &cuts, &s.job.ops);
+        assert_eq!(prog.end_turn, Some(want), "from B{last}");
+    }
     // The wire is off before it goes home.
     assert!(text[..home].rfind("M5").is_some_and(|m| m > text.find("(Release").unwrap_or(0)));
     // From the right of the stock, home goes over the top (no end turn, to look at just that).
-    s.job.machine.post.end_b = None;
+    s.job.machine.post.square_b = false;
     let at = crate::wire::WirePos::new(400.0, 50.0, 0.0);
     let mut cuts = s.job.cuts.clone();
     if let Some(c) = cuts.first_mut() {

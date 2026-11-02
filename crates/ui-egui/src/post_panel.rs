@@ -177,20 +177,7 @@ impl PostPanel {
             ui.label("Start (safety) block");
             code(ui, &mut e.header, 4);
             note(ui, "{units} becomes G20 or G21, {job} the job's name, {preheat} the preheat seconds");
-            ui.horizontal(|ui| {
-                let mut turn = e.end_b.is_some();
-                if ui.checkbox(&mut turn, "Turn the table to").changed() {
-                    e.end_b = turn.then_some(e.end_b.unwrap_or(180.0));
-                }
-                let mut b = e.end_b.unwrap_or(180.0);
-                if ui
-                    .add_enabled(turn, egui::DragValue::new(&mut b).range(-360.0..=360.0).speed(1.0).suffix("°"))
-                    .changed()
-                {
-                    e.end_b = Some(b);
-                }
-                ui.label("after the last cut");
-            });
+            ui.checkbox(&mut e.square_b, "Turn the table to B0 or B180, whichever is nearer, after the last cut");
             note(
                 ui,
                 "With the wire off and clear of the foam (out past where it swings, or above it), before going home",

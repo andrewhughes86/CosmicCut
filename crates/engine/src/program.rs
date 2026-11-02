@@ -123,11 +123,14 @@ impl Program {
             }
         }
         // Then the table turned to its end angle (clear of the foam), and home, clear of the part.
-        let turn_to = machine.post.end_b.filter(|_| machine.b_axis && !prog.moves.is_empty());
-        let turning = turn_to.filter(|b| {
-            let end = prog.moves.last().map_or(prog.start, |(_, m)| m.to);
-            (end.b - machine.machine_b(*b)).abs() > 1.0e-9
-        });
+        // B0 or B180, whichever is nearer where the last cut left the table.
+        let turning =
+            machine.post.square_b.then_some(()).filter(|_| machine.b_axis && !prog.moves.is_empty()).and_then(|_| {
+                let end = prog.moves.last().map_or(prog.start, |(_, m)| m.to);
+                let b = machine.machine_b(end.b);
+                let to = if b.abs() <= (b - 180.0).abs() { 0.0 } else { 180.0 };
+                ((b - to).abs() > 1.0e-9).then_some(to)
+            });
         if (machine.post.return_home || turning.is_some()) && !prog.moves.is_empty() {
             prog.home_at = Some(prog.moves.len());
         }
