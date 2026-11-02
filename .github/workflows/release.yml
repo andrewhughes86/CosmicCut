@@ -1,0 +1,170 @@
+# Builds the installers for Linux, macOS and Windows and publishes them as a GitHub release.
+# Runs when a version tag is pushed: git tag v0.1.0 && git push origin v0.1.0
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+  icons:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Render the app icon (PNG, ICO, ICNS)
+        run: |
+          sudo apt-get update && sudo apt-get install -y librsvg2-bin icnsutils imagemagick
+          mkdir -p icons
+          for s in 16 32 48 64 128 256 512; do
+            rsvg-convert -w $s -h $s assets/icons/app/cosmiccut.svg -o icons/$s.png
+          done
+          convert icons/16.png icons/32.png icons/48.png icons/64.png icons/128.png icons/256.png icons/cosmiccut.ico
+          png2icns icons/CosmicCut.icns icons/16.png icons/32.png icons/48.png icons/128.png icons/256.png icons/512.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: icons
+          path: icons
+
+  linux:
+    runs-on: ubuntu-22.04 # older glibc, so the binary runs on more distributions
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p CosmicCut
+      - name: Package (.tar.gz and .deb)
+        run: |
+          version="${TAG#v}"
+          strip target/release/CosmicCut
+          # tar.gz: the program, its menu entry and icon, and an installer for one user.
+          dir=CosmicCut-linux-x86_64
+          mkdir -p $dir
+          cp target/release/CosmicCut packaging/linux/cosmiccut.desktop packaging/linux/install.sh $dir/
+          cp assets/icons/app/cosmiccut.svg README.md LICENSE-MIT LICENSE-APACHE ATTRIBUTION.md $dir/
+          tar czf $dir.tar.gz $dir
+          # .deb
+          root=deb
+          mkdir -p $root/DEBIAN $root/usr/bin $root/usr/share/applications \
+            $root/usr/share/icons/hicolor/scalable/apps $root/usr/share/doc/cosmiccut
+          install -m 755 target/release/CosmicCut $root/usr/bin/cosmiccut
+          install -m 644 packaging/linux/cosmiccut.desktop $root/usr/share/applications/
+          install -m 644 assets/icons/app/cosmiccut.svg $root/usr/share/icons/hicolor/scalable/apps/
+          install -m 644 README.md LICENSE-MIT LICENSE-APACHE ATTRIBUTION.md $root/usr/share/doc/cosmiccut/
+          cat > $root/DEBIAN/control <<CONTROL
+          Package: cosmiccut
+          Version: $version
+          Section: graphics
+          Priority: optional
+          Architecture: amd64
+          Depends: libc6 (>= 2.35), libxkbcommon0, libgl1 | libvulkan1
+          Recommends: libvulkan1, mesa-vulkan-drivers | nvidia-driver
+          Maintainer: Andy Hughes <andrewhughes86@gmail.com>
+          Homepage: https://github.com/andrewhughes86/CosmicCut
+          Description: CAM for XYB hot-wire foam cutters
+           Import or sketch shapes, set up cuts, simulate them and post G-code
+           for hot-wire foam cutters with a B-axis turntable.
+          CONTROL
+          dpkg-deb --build --root-owner-group $root CosmicCut-linux-amd64.deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            CosmicCut-linux-x86_64.tar.gz
+            CosmicCut-linux-amd64.deb
+
+  macos:
+    needs: icons
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: icons
+          path: icons
+      - name: Build (Apple silicon and Intel)
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          cargo build --release --locked -p CosmicCut --target aarch64-apple-darwin
+          cargo build --release --locked -p CosmicCut --target x86_64-apple-darwin
+      - name: Package (.app in a .dmg)
+        run: |
+          version="${TAG#v}"
+          app=dist/CosmicCut.app
+          mkdir -p $app/Contents/MacOS $app/Contents/Resources
+          lipo -create -output $app/Contents/MacOS/CosmicCut \
+            target/aarch64-apple-darwin/release/CosmicCut target/x86_64-apple-darwin/release/CosmicCut
+          strip -x $app/Contents/MacOS/CosmicCut
+          sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > $app/Contents/Info.plist
+          cp icons/CosmicCut.icns $app/Contents/Resources/
+          # Ad-hoc signature: Apple silicon will not run an unsigned binary at all.
+          codesign --force --deep --sign - $app
+          ln -s /Applications dist/Applications
+          hdiutil create -volname CosmicCut -srcfolder dist -ov -format UDZO CosmicCut-macos-universal.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: CosmicCut-macos-universal.dmg
+
+  windows:
+    needs: icons
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: icons
+          path: icons
+      - run: cargo build --release --locked -p CosmicCut
+      - name: Package (installer and zip)
+        shell: pwsh
+        run: |
+          $version = $env:TAG.TrimStart('v')
+          New-Item -ItemType Directory -Force -Path stage | Out-Null
+          Copy-Item target/release/CosmicCut.exe, icons/cosmiccut.ico, README.md, LICENSE-MIT, LICENSE-APACHE, ATTRIBUTION.md stage/
+          Compress-Archive -Path stage/* -DestinationPath CosmicCut-windows-x64.zip -Force
+          choco install innosetup -y --no-progress
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DVersion=$version" "/DSource=$PWD\stage" "/O$PWD" packaging/windows/cosmiccut.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            CosmicCut-windows-x64-setup.exe
+            CosmicCut-windows-x64.zip
+
+  release:
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Release notes
+        run: sed "s/@TAG@/$TAG/g" packaging/release-notes.md > notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: CosmicCut ${{ env.TAG }}
+          body_path: notes.md
+          files: out/*

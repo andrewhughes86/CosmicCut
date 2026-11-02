@@ -1,4 +1,6 @@
 //! CosmicCut desktop application: CAM for XYB hot-wire foam cutters.
+// A release build on Windows is a windowed app: no console window behind it.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 #![deny(
     clippy::unwrap_used,
     clippy::expect_used,

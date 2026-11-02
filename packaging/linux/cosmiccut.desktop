@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=CosmicCut
+GenericName=Hot-wire foam CAM
+Comment=CAM for XYB hot-wire foam cutters
+Exec=cosmiccut %f
+Icon=cosmiccut
+Terminal=false
+Categories=Graphics;Engineering;
+MimeType=application/x-cosmiccut;
