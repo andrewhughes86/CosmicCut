@@ -15,6 +15,16 @@ It opens with a sample job: a low-poly penguin (`samples/penguin.stl`) cut from 
 with a profile every 22.5°. **Sample** in the job's right-click menu opens it again. `--empty` starts with an empty job;
 `CosmicCut job.ccut` opens a job. `--help` lists the other options.
 
+### In a browser
+
+<https://andrewhughes86.github.io/CosmicCut/> runs the same app (WebGPU, or WebGL 2 where
+there is none). Every push to `main` rebuilds it (`.github/workflows/pages.yml`). Open and
+Import upload a file into the page; Save and Post G-code download one. Settings, machines and
+post processors are kept in the browser's local storage. To build it yourself:
+
+    rustup target add wasm32-unknown-unknown
+    cd apps/CosmicCut && trunk serve --release
+
 ## Menus
 
 The menu bar above the ribbon holds **File** (New, Open, Save, Save as, Close, which asks

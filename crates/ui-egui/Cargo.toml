@@ -1,0 +1,33 @@
+[package]
+name = "CosmicCut-ui-egui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+CosmicCut-engine = { workspace = true }
+CosmicCut-geom = { workspace = true }
+CosmicCut-io = { workspace = true }
+CosmicCut-render = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+eframe = { workspace = true, features = ["accesskit", "default_fonts", "persistence", "wgpu", "wayland", "x11"] }
+egui = { workspace = true }
+egui-wgpu = { workspace = true }
+egui_dock = { workspace = true }
+log = { workspace = true }
+png = { workspace = true }
+resvg = { workspace = true }
+rfd = { workspace = true }
+serde_json = { workspace = true }
+wgpu = { workspace = true, features = ["wgsl"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3.106"
+wasm-bindgen = "0.2.129"
+wasm-bindgen-futures = "0.4.79"
+web-sys = { version = "0.3.106", features = ["Blob", "BlobPropertyBag", "Document", "Element", "HtmlAnchorElement", "HtmlCanvasElement", "Url", "Window"] }

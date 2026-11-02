@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none" stroke="#INK" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M5 22c0-9 5-15 11-15s11 6 11 15z" fill="#FACE" stroke="#INK"/>
+  <path d="M5 22h22" stroke="#ACCENT"/>
+</svg>

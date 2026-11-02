@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- CosmicCut application icon: a block of foam in deep space, a glowing hot wire slicing a
+       curve through it. Original artwork, MIT OR Apache-2.0. -->
+  <defs>
+    <linearGradient id="space" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#1D2D52"/>
+      <stop offset="1" stop-color="#090F1F"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FF8A4C" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#FF8A4C" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="tile">
+      <rect x="12" y="12" width="232" height="232" rx="52"/>
+    </clipPath>
+  </defs>
+  <rect x="12" y="12" width="232" height="232" rx="52" fill="url(#space)"/>
+  <g clip-path="url(#tile)">
+    <g fill="#FFFFFF">
+      <circle cx="54" cy="56" r="2.6"/>
+      <circle cx="204" cy="50" r="2"/>
+      <circle cx="214" cy="196" r="2.4"/>
+      <circle cx="40" cy="190" r="1.8"/>
+      <circle cx="120" cy="34" r="1.6"/>
+    </g>
+    <!-- The foam block. -->
+    <polygon points="56,110 128,146 128,214 56,178" fill="#3A4C6A" stroke="#9FB0C8" stroke-width="4" stroke-linejoin="round"/>
+    <polygon points="128,146 200,110 200,178 128,214" fill="#22304A" stroke="#9FB0C8" stroke-width="4" stroke-linejoin="round"/>
+    <polygon points="128,74 200,110 128,146 56,110" fill="#5A6E8E" stroke="#9FB0C8" stroke-width="4" stroke-linejoin="round"/>
+    <!-- The cut it leaves: a curve down the front faces. -->
+    <path d="M70 152c12-20 30-26 44-14s18 26 32 20 26-24 40-30" fill="none" stroke="#22D3EE" stroke-width="7" stroke-linecap="round"/>
+    <!-- The hot wire, between its towers. -->
+    <ellipse cx="128" cy="96" rx="96" ry="22" fill="url(#glow)"/>
+    <line x1="30" y1="96" x2="226" y2="96" stroke="#FF8A4C" stroke-width="6" stroke-linecap="round"/>
+    <rect x="22" y="60" width="12" height="72" rx="4" fill="#E6ECF5"/>
+    <rect x="222" y="60" width="12" height="72" rx="4" fill="#E6ECF5"/>
+  </g>
+</svg>

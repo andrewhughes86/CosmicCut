@@ -1,0 +1,72 @@
+[workspace]
+resolver = "3"
+members = [
+    "apps/CosmicCut",
+    "crates/engine",
+    "crates/geom",
+    "crates/io",
+    "crates/render",
+    "crates/ui-egui",
+]
+default-members = ["apps/CosmicCut"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unimplemented = "deny"
+todo = "deny"
+unreachable = "deny"
+
+[workspace.dependencies]
+CosmicCut-engine = { path = "crates/engine" }
+CosmicCut-geom = { path = "crates/geom" }
+CosmicCut-io = { path = "crates/io" }
+CosmicCut-render = { path = "crates/render" }
+CosmicCut-ui-egui = { path = "crates/ui-egui" }
+
+bytemuck = { version = "1.25", features = ["derive"] }
+eframe = { version = "0.36.2", default-features = false }
+egui = "0.36.2"
+egui-wgpu = "0.36.2"
+egui_dock = "0.21.1"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
+getrandom = "0.4"
+glam = "0.30"
+i_overlay = { version = "9.1", default-features = false }
+log = "0.4"
+miniz_oxide = "0.8"
+resvg = { version = "=0.48.1", default-features = false }
+rfd = "0.17.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+spade = "2.15"
+png = "0.18"
+quick-xml = "0.41"
+thiserror = "2"
+wgpu = { version = "30", default-features = false }
+
+[profile.release]
+debug = "line-tables-only"
+
+# The geometry kernels (voxel foam, offsets) and file readers crawl unoptimised.
+[profile.dev.package.CosmicCut-geom]
+opt-level = 2
+
+[profile.dev.package.CosmicCut-io]
+opt-level = 2
+
+[profile.dev.package.CosmicCut-engine]
+opt-level = 2
+
+[profile.dev.package.spade]
+opt-level = 2

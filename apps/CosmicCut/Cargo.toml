@@ -1,0 +1,25 @@
+[package]
+name = "CosmicCut"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "CAM for XYB hot-wire foam cutters"
+
+[lints]
+workspace = true
+
+[dependencies]
+CosmicCut-ui-egui = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+env_logger = { workspace = true }
+
+# The browser build (`trunk build`, see index.html).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+eframe = { workspace = true }
+log = { workspace = true }
+wasm-bindgen = "0.2.129"
+wasm-bindgen-futures = "0.4.79"
+web-sys = { version = "0.3.106", features = ["Document", "Element", "HtmlCanvasElement", "HtmlElement", "Window"] }

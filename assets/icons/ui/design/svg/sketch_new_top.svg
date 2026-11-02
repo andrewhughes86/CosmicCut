@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none" stroke="#INK" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <polygon points="16,11 29,17.5 16,24 3,17.5" fill="#FACE"/>
+  <path d="M10 17.5l6-3 6 3" stroke="#ACCENT"/>
+  <path d="M16 3v6M13 6h6" stroke="#ACCENT"/>
+</svg>
