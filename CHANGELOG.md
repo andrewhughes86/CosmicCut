@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.1
+
+- **Origin in the explorer.** The program's X0 Y0 can be machine zero (as before) or the
+  turntable: X0 on its axis, Y0 at the table top. Right-click *Origin* to choose, or
+  double-click it to switch. It is saved with the job, and the G-code says which one it uses.
+- **Table turns as G1.** A post processor setting writes the moves that turn the table as G1 at
+  a feed you give (written as the F word as it is, degrees per minute on most controllers)
+  instead of G0. The cut after a turn gets its own feed back.
+- Swarf: a wall that meets a ledge in a corner no longer counts as cutting into the part. A
+  ledge beside a slanted wall is swept along the wall. Ledges that do not touch are swept
+  separately.
+
 ## 0.4.0
 
 - The download files carry the version in their names, e.g. `CosmicCut-0.4.0-windows-x64-setup.exe`.

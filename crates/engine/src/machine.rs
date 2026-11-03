@@ -8,6 +8,46 @@ use crate::params;
 use crate::post::PostSettings;
 use crate::units::DisplayUnits;
 
+/// Where a program's X0 Y0 is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Origin {
+    /// Machine zero: X and Y as the machine counts them.
+    #[default]
+    Machine,
+    /// The turntable's axis at the table top.
+    Table,
+}
+
+impl Origin {
+    pub const ALL: [Self; 2] = [Self::Machine, Self::Table];
+    pub const IDS: &'static [&'static str] = &["machine", "table"];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Machine => "machine",
+            Self::Table => "table",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|o| o.id() == id)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Machine => "Machine 0,0",
+            Self::Table => "Turntable 0,0",
+        }
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Machine => "X0 Y0 at machine zero",
+            Self::Table => "X0 on the turntable's axis, Y0 at the table top",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Machine {
     pub name: String,
@@ -200,6 +240,14 @@ impl Machine {
         (self.table_x + u, h - self.wire_y0)
     }
 
+    /// The program's X and Y of a wire position, from `origin`.
+    pub fn program_xy(&self, origin: Origin, u: f64, h: f64) -> (f64, f64) {
+        match origin {
+            Origin::Machine => self.machine_xy(u, h),
+            Origin::Table => (u, h),
+        }
+    }
+
     /// The program's B word for a table-frame angle.
     pub fn machine_b(&self, b: f64) -> f64 {
         if self.b_reversed { -b } else { b }
@@ -240,5 +288,6 @@ mod tests {
         assert!(m.apply(&json!({ "rapid": 0.0 })).is_err());
         assert_eq!(m.rapid, Machine::default().rapid);
         assert_eq!(m.machine_xy(10.0, 0.0), (1280.0, 0.0));
+        assert_eq!(m.program_xy(Origin::Table, 10.0, 5.0), (10.0, 5.0));
     }
 }

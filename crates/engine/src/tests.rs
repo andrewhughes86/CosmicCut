@@ -408,6 +408,62 @@ fn a_model_can_be_freed_from_the_table_centre() {
 }
 
 #[test]
+fn the_program_origin_can_be_machine_zero_or_the_turntable() {
+    let mut s = Session::with_sample();
+    let gcode =
+        |s: &mut Session| run(s, "post.gcode.preview", json!({}))["text"].as_str().unwrap_or_default().to_owned();
+    let machine = gcode(&mut s);
+    assert!(machine.contains("Origin: Machine 0,0"), "{machine}");
+    run(&mut s, "origin.set", json!({ "at": "table" }));
+    assert_eq!(s.job.origin, crate::machine::Origin::Table);
+    let table = gcode(&mut s);
+    assert!(table.contains("Origin: Turntable 0,0"), "{table}");
+    // Home is machine zero: the turntable axis's X away, in the program's units.
+    let home = crate::units::DisplayUnits::Inches.from_mm(-s.job.machine.table_x);
+    assert!(table.contains(&format!("X{home}")), "{table}");
+    assert_ne!(machine, table);
+    // Saved with the job.
+    let back = crate::jobfile::from_json(&crate::jobfile::to_json(&s.job)).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(back.origin, crate::machine::Origin::Table);
+    assert!(s.execute("origin.set", &json!({ "at": "nowhere" })).is_err());
+}
+
+#[test]
+fn table_turns_can_be_g1_at_a_feed() {
+    let mut s = Session::with_sample();
+    let gcode =
+        |s: &mut Session| run(s, "post.gcode.preview", json!({}))["text"].as_str().unwrap_or_default().to_owned();
+    // Plays the program's modal G and F words: (rapid table turns, G1 table turns, feed moves
+    // without B at the B feed).
+    let play = |text: &str| {
+        let (mut g, mut f, mut counts) = ("", "", (0, 0, 0));
+        for line in text.lines().filter(|l| !l.starts_with('(')) {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            g = words.iter().copied().find(|w| *w == "G0" || *w == "G1").unwrap_or(g);
+            f = words.iter().copied().find(|w| w.starts_with('F')).unwrap_or(f);
+            let turns = words.iter().any(|w| w.starts_with('B'));
+            match (g, turns) {
+                ("G0", true) => counts.0 += 1,
+                ("G1", true) => counts.1 += 1,
+                ("G1", false) if f == "F720" && words.iter().any(|w| w.starts_with('X')) => counts.2 += 1,
+                _ => {}
+            }
+        }
+        counts
+    };
+    let before = gcode(&mut s);
+    assert!(play(&before).0 > 0, "{before}");
+    run(&mut s, "post.settings", json!({ "b_g1": true, "b_feed": 720.0 }));
+    let after = gcode(&mut s);
+    // No rapid turns the table; the turns are G1 at the B feed, and the cuts after them get
+    // their own feed back.
+    let (rapid, fed, slow) = play(&after);
+    assert!(rapid == 0 && fed > 0 && slow == 0, "{rapid} {fed} {slow}\n{after}");
+    assert!(after.contains("F720"), "{after}");
+    assert!(s.execute("post.settings", &json!({ "b_feed": 0.0 })).is_err());
+}
+
+#[test]
 fn machines_and_post_processors_come_from_the_libraries() {
     let mut s = Session::with_sample();
     assert_eq!(s.job.machine.post_name, "HotwireCNC");
@@ -993,4 +1049,25 @@ fn one_swarf_cut_takes_faces_from_several_models() {
     let e = s.execute("cut.swarf", &json!({ "parts": inner }));
     assert!(e.is_ok(), "{e:?}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The mockup: slanting walls standing on ledges, the corners between them, and the ledges
+/// against the walls. Every face cuts on its own, and all of them together.
+#[test]
+fn every_face_of_the_mockup_cuts_with_the_swarf_tool() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../samples/Mockup.step");
+    if !std::path::Path::new(path).is_file() {
+        return;
+    }
+    let mut s = Session::new();
+    run(&mut s, "model.import", json!({ "path": path }));
+    run(&mut s, "stock.fit", json!({}));
+    let model = s.job.models[0].clone();
+    for f in 0..model.faces.faces.len() {
+        let r = s.preview_cut(crate::cut::CutKind::Swarf, &json!({ "model": model.id, "faces": [f] }));
+        assert!(r.is_ok(), "face {f}: {:?}", r.err());
+    }
+    let all: Vec<usize> = (0..model.faces.faces.len()).collect();
+    let r = s.preview_cut(crate::cut::CutKind::Swarf, &json!({ "model": model.id, "faces": all }));
+    assert!(r.is_ok(), "all faces: {:?}", r.err());
 }

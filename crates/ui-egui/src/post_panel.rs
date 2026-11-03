@@ -156,6 +156,11 @@ impl PostPanel {
                 ui.label("Turntable axis letter");
                 ui.add(egui::TextEdit::singleline(&mut e.b_letter).desired_width(30.0));
             });
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut e.b_g1, "Turn the table with G1 at feed");
+                ui.add_enabled(e.b_g1, egui::DragValue::new(&mut e.b_feed).range(0.001..=1.0e6).speed(10.0))
+                    .on_hover_text("Written as the F word as it is: degrees per minute on most controllers");
+            });
         });
         card(ui, tokens, "Wire", "Switching the wire on and off, and what happens between cuts.", |ui| {
             ui.label("Wire on");

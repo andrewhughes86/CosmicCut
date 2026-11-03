@@ -25,7 +25,9 @@ struct Body<'a> {
 }
 
 impl Body<'_> {
-    /// Whether the wire at `p`, with `clear` either side for the kerf, touches the model.
+    /// Whether the wire at `p`, with `clear` either side for the kerf, touches the model. A
+    /// negative `clear` asks instead whether the wire goes inside it by more than that: running
+    /// along its surface (in a corner, say) does not count.
     fn hit(&self, p: &WirePos, clear: f64) -> bool {
         let a = u_axis(p.b);
         if p.h < self.lo - clear || p.h > self.hi + clear {
@@ -41,9 +43,14 @@ impl Body<'_> {
         }
         // Seen along the wire, the wire is a point; the model, its triangles.
         let w = DVec2::new(p.u, p.h);
+        let edges = [(0, 1), (1, 2), (2, 0)];
         self.tris.iter().any(|t| {
             let q = t.map(|c| DVec2::new(c.dot(a), c.z));
-            inside(w, q) || (clear > 0.0 && [(0, 1), (1, 2), (2, 0)].iter().any(|&(i, j)| near(w, q[i], q[j]) < clear))
+            if clear < 0.0 {
+                inside(w, q) && edges.iter().all(|&(i, j)| near(w, q[i], q[j]) > -clear)
+            } else {
+                inside(w, q) || (clear > 0.0 && edges.iter().any(|&(i, j)| near(w, q[i], q[j]) < clear))
+            }
         })
     }
 }

@@ -1121,7 +1121,7 @@ fn playback(ui: &mut Ui, viewport: Rect, session: &Session, tokens: &Tokens, req
                 });
             }
             let w: WirePos = sim.wire();
-            let (x, y) = m.machine_xy(w.u, w.h);
+            let (x, y) = m.program_xy(session.job.origin, w.u, w.h);
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(format!("X {}   Y {}   B {:.2}°", units.plain(x), units.plain(y), m.machine_b(w.b)))

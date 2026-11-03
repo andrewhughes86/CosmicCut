@@ -441,20 +441,41 @@ fn split(
             }
         }
     }
-    // Level faces at one height facing one way are one sweep: (height, up 1 or down -1, faces,
-    // triangles).
+    // Level faces that touch, at one height facing one way, are one sweep: (height, up 1 or
+    // down -1, faces, triangles). Ledges apart (either side of a tower, say) are swept apart.
+    let neighbours = model.face_neighbours();
     let mut sweeps: Vec<(f64, f64, Vec<usize>, Vec<Tri>)> = Vec::new();
-    for &f in &flat {
+    let mut todo: Vec<usize> = flat.clone();
+    while let Some(f) = todo.pop() {
         let (Some(&face), Some(tris)) = (faces.get(f), by_face.get(f)) else { continue };
         let z = range(tris).0;
         let up = if tris.iter().map(|t| t.normal().z).sum::<f64>() >= 0.0 { 1.0 } else { -1.0 };
-        match sweeps.iter_mut().find(|(h, u, _, _)| (h - z).abs() <= tol && *u == up) {
-            Some((_, _, fs, ts)) => {
-                fs.push(face);
-                ts.extend_from_slice(tris);
+        let mut fs = vec![face];
+        let mut ts = tris.clone();
+        // Grow it by the level faces it touches, and those they touch.
+        let mut k = 0;
+        while let Some(&g) = fs.get(k) {
+            k += 1;
+            let touching: Vec<usize> = todo
+                .iter()
+                .copied()
+                .filter(|&o| {
+                    faces.get(o).is_some_and(|of| neighbours.get(g).is_some_and(|n| n.contains(of)))
+                        && by_face.get(o).is_some_and(|t| {
+                            let uo = if t.iter().map(|x| x.normal().z).sum::<f64>() >= 0.0 { 1.0 } else { -1.0 };
+                            (range(t).0 - z).abs() <= tol && uo == up
+                        })
+                })
+                .collect();
+            for o in touching {
+                todo.retain(|x| *x != o);
+                if let (Some(&of), Some(t)) = (faces.get(o), by_face.get(o)) {
+                    fs.push(of);
+                    ts.extend_from_slice(t);
+                }
             }
-            None => sweeps.push((z, up, vec![face], tris.clone())),
         }
+        sweeps.push((z, up, fs, ts));
     }
 
     (groups, sweeps)
@@ -564,7 +585,9 @@ pub(crate) fn swarf(cx: &Context<'_>, p: &Value) -> EngineResult<Built> {
         }
         None => Obstacles::new(&[]),
     };
-    let (clear_other, clear_own) = (c.kerf / 2.0, c.kerf / 4.0);
+    // Other models: the kerf must keep clear. The part itself: the wire runs along its faces and
+    // into its corners, so only going inside it (beyond the tolerance) counts.
+    let (clear_other, clear_own) = (c.kerf / 2.0, -tol);
     let none = Obstacles::new(&[]);
     let blocked = |k: usize, own: &Obstacles<'_>, from: WirePos, to: WirePos| {
         let others = others.get(k).unwrap_or(&none);
@@ -644,8 +667,24 @@ pub(crate) fn swarf(cx: &Context<'_>, p: &Value) -> EngineResult<Built> {
         // side that make the shortest way in clear of the part and the other models.
         let mut best: Option<(f64, WirePos, WirePos)> = None;
         let mut stopped: Option<(String, WirePos)> = None;
-        for k in 0..24 {
-            let b = now + 15.0 * k as f64;
+        // Every 15°, and along each edge of the face (a ledge against a slanting wall is swept
+        // with the wire along the wall), each from both sides.
+        let mut tries: Vec<f64> = (0..24).map(|k| now + 15.0 * k as f64).collect();
+        for t in tris {
+            for (i, j) in [(0, 1), (1, 2), (2, 0)] {
+                let d = t.p[j] - t.p[i];
+                if d.x.hypot(d.y) > 1.0e-6 {
+                    let along = d.x.atan2(d.y).to_degrees();
+                    tries.extend([along, along + 180.0]);
+                }
+            }
+        }
+        let wrap = |b: f64| (b - now + 180.0).rem_euclid(360.0) + now - 180.0;
+        let mut tries: Vec<f64> = tries.into_iter().map(wrap).collect();
+        tries.sort_by(f64::total_cmp);
+        tries.dedup_by(|a, b| (*a - *b).abs() < 0.05);
+        tries.truncate(400);
+        for b in tries {
             let a = u_axis(b);
             let far = pts.iter().map(|q| q.x * a.x + q.y * a.y).fold(f64::NEG_INFINITY, f64::max);
             let outside = WirePos::new(-(reach + c.clearance), h, b);

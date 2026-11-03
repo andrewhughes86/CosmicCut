@@ -13,7 +13,7 @@ foam come away in the simulation, and post G-code for the machine.
 
 Download the file for your system from the
 **[latest release](https://github.com/andrewhughes86/CosmicCut/releases/latest)** (the version is
-in each file's name, e.g. `CosmicCut-0.4.0-windows-x64-setup.exe`):
+in each file's name, e.g. `CosmicCut-0.4.1-windows-x64-setup.exe`):
 
 | System | File |
 | --- | --- |
@@ -80,7 +80,9 @@ Uninstalling leaves that file alone. Copy it to keep a backup.
   away, and the wire's X, Y and B are shown as it moves.
 - **G-code you control.** Machine and post processor libraries with HotwireCNC, LinuxCNC,
   Mach3/Mach4 and generic posts. Every block of code, the units, decimals, arcs, comments and
-  end moves can be edited.
+  end moves can be edited, and table turns can be written as G1 at a feed you set. The
+  program's X0 Y0 (**Origin** in the explorer) is machine zero or the turntable's axis at the
+  table top.
 - **Safe moves.** The table only turns with the wire clear of the foam, the wire never goes
   below Y0, and the program starts and ends at home, going over the part only when it's in the
   way.
@@ -220,8 +222,8 @@ cuts, a DXF arch and an SVG chess-pawn half profile.
 - Pushing a version tag builds the Windows, macOS and Linux packages and publishes a release
   (`.github/workflows/release.yml`; the packaging files are in `packaging/`):
 
-      git tag v0.4.0
-      git push origin v0.4.0
+      git tag v0.4.1
+      git push origin v0.4.1
 
   For a new version, first bump `version` in the root `Cargo.toml` and add its section to
   `CHANGELOG.md`; the release notes start with that section.

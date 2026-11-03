@@ -3,7 +3,8 @@
 
 use CosmicCut_engine::Session;
 use CosmicCut_engine::cut::{Built, CutKind};
-use CosmicCut_engine::session::{MACHINE_ID, MODELS_ID, OutlineNode, PROGRAM_ID, SHAPES_ID, STOCK_ID};
+use CosmicCut_engine::machine::Origin;
+use CosmicCut_engine::session::{MACHINE_ID, MODELS_ID, ORIGIN_ID, OutlineNode, PROGRAM_ID, SHAPES_ID, STOCK_ID};
 use CosmicCut_engine::units::DisplayUnits;
 use CosmicCut_engine::wire::{MoveKind, WirePath};
 use egui::collapsing_header::CollapsingState;
@@ -144,6 +145,10 @@ fn open(id: &str, session: &Session) -> Vec<Request> {
     } else {
         match id {
             MACHINE_ID => one("machine.edit", Value::Null),
+            ORIGIN_ID => {
+                let other = if session.job.origin == Origin::Machine { Origin::Table } else { Origin::Machine };
+                one("origin.set", json!({ "at": other.id() }))
+            }
             STOCK_ID => one("ui.stock.edit", Value::Null),
             PROGRAM_ID => one("post.gcode.preview", Value::Null),
             _ => Vec::new(),
@@ -237,6 +242,12 @@ fn context_menu(
                 MACHINE_ID => {
                     item(ui, "Edit machine…", one("machine.edit", Value::Null));
                     item(ui, "Post processor…", one("post.settings", Value::Null));
+                }
+                ORIGIN_ID => {
+                    for o in Origin::ALL {
+                        let mark = if o == session.job.origin { "● " } else { "○ " };
+                        item(ui, &format!("{mark}{}", o.label()), one("origin.set", json!({ "at": o.id() })));
+                    }
                 }
                 MODELS_ID => item(ui, "Import model…", one("model.import", Value::Null)),
                 STOCK_ID => item(ui, "Edit stock…", one("ui.stock.edit", Value::Null)),
@@ -483,8 +494,8 @@ pub fn cut_plane(ui: &mut Ui, session: &Session, tokens: &Tokens, preview: Optio
             egui::Align2::LEFT_BOTTOM,
             format!(
                 "X {}  Y {}",
-                units.plain(job.machine.machine_xy(w.u, w.h).0),
-                units.plain(job.machine.machine_xy(w.u, w.h).1)
+                units.plain(job.machine.program_xy(job.origin, w.u, w.h).0),
+                units.plain(job.machine.program_xy(job.origin, w.u, w.h).1)
             ),
             egui::FontId::monospace(11.0),
             tokens.text,
@@ -588,7 +599,7 @@ pub fn gcode(ui: &mut Ui, session: &Session, tokens: &Tokens, state: &mut GcodeS
     let job = &session.job;
     let key = job.revision ^ (job.edits << 32);
     if state.revision != Some(key) {
-        let posted = CosmicCut_engine::post::post(&job.machine, &job.stock, &job.cuts, &job.ops, &job.name);
+        let posted = CosmicCut_engine::post::post(&job.machine, job.origin, &job.stock, &job.cuts, &job.ops, &job.name);
         state.summary = format!(
             "{} lines  ·  about {}  ·  {}",
             posted.lines,

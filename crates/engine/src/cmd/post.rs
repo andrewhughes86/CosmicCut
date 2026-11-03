@@ -51,7 +51,7 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         returns: "{text, lines, seconds, warnings}",
         enabled: super::has_cuts,
         run: |s, _| {
-            let posted = post::post(&s.job.machine, &s.job.stock, &s.job.cuts, &s.job.ops, &s.job.name);
+            let posted = post::post(&s.job.machine, s.job.origin, &s.job.stock, &s.job.cuts, &s.job.ops, &s.job.name);
             s.ui.requests.push(UiRequest::FocusPane(Pane::Gcode));
             let mut v = posted.summary_json();
             v["text"] = json!(posted.text);
@@ -72,7 +72,7 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
             let path = params::req_str(p, "path")?.to_owned();
             let ext = s.job.machine.post.extension.clone();
             let path = if std::path::Path::new(&path).extension().is_none() { format!("{path}.{ext}") } else { path };
-            let posted = post::post(&s.job.machine, &s.job.stock, &s.job.cuts, &s.job.ops, &s.job.name);
+            let posted = post::post(&s.job.machine, s.job.origin, &s.job.stock, &s.job.cuts, &s.job.ops, &s.job.name);
             CosmicCut_io::files::write(&path, posted.text.as_bytes())
                 .map_err(|e| EngineError::InvalidParams(format!("could not write {path}: {e}")))?;
             let mut v = posted.summary_json();
@@ -91,7 +91,7 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         returns: "{problems: [text]}",
         enabled: super::has_cuts,
         run: |s, _| {
-            let posted = post::post(&s.job.machine, &s.job.stock, &s.job.cuts, &s.job.ops, &s.job.name);
+            let posted = post::post(&s.job.machine, s.job.origin, &s.job.stock, &s.job.cuts, &s.job.ops, &s.job.name);
             Ok(json!({ "problems": posted.warnings }))
         },
     },

@@ -21,6 +21,7 @@ pub fn to_json(job: &JobState) -> Value {
         "format": FORMAT,
         "name": job.name,
         "machine": job.machine.to_json(),
+        "origin": job.origin.id(),
         "stock": job.stock.to_json(),
         "shapes": job.shapes.iter().map(Shape::save_json).collect::<Vec<_>>(),
         "models": job.models.iter().map(crate::model::Model::save_json).collect::<Vec<_>>(),
@@ -41,6 +42,7 @@ pub fn from_json(v: &Value) -> EngineResult<JobState> {
     let mut job = JobState {
         name: v.get("name").and_then(Value::as_str).unwrap_or("Untitled").chars().take(200).collect(),
         machine: v.get("machine").map(Machine::from_json).transpose()?.unwrap_or_default(),
+        origin: v.get("origin").and_then(Value::as_str).and_then(crate::machine::Origin::from_id).unwrap_or_default(),
         stock: v.get("stock").map(Stock::from_json).transpose()?.unwrap_or_default(),
         ..JobState::default()
     };

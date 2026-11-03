@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use crate::cut::{Cut, fmt_time};
 use crate::error::{EngineError, EngineResult};
-use crate::machine::Machine;
+use crate::machine::{Machine, Origin};
 use crate::op::Operation;
 use crate::params;
 use crate::program::Program;
@@ -48,6 +48,11 @@ pub struct PostSettings {
     pub arcs: bool,
     /// The letter of the turntable axis.
     pub b_letter: String,
+    /// Turn the table with G1 at `b_feed` instead of G0, for controllers that will not rapid B.
+    pub b_g1: bool,
+    /// Feed of those moves, written as the F word as it is (degrees per minute on most
+    /// controllers).
+    pub b_feed: f64,
     /// Decimal places of X and Y; none for 4 in inches, 3 in millimetres.
     pub decimals: Option<u32>,
     /// N numbers on each line.
@@ -83,6 +88,8 @@ impl Default for PostSettings {
             feed_every_line: false,
             arcs: true,
             b_letter: "B".into(),
+            b_g1: false,
+            b_feed: 1800.0,
             decimals: None,
             line_numbers: false,
             line_start: 10,
@@ -114,6 +121,8 @@ pub const PARAMS: &[crate::Param] = {
         Param::optional("feed_every_line", Bool, "The feed on every feed move"),
         Param::optional("arcs", Bool, "Write G2/G3 arcs where the path follows circles"),
         Param::optional("b_letter", Str, "Letter of the turntable axis"),
+        Param::optional("b_g1", Bool, "Turn the table with G1 at the B feed instead of G0"),
+        Param::optional("b_feed", Number { min: 0.001, max: 1.0e6 }, "Feed of G1 table turns, the F word as written"),
         Param::optional("decimals", Integer { min: 0, max: 8 }, "Decimal places of X and Y (default 4 in, 3 mm)"),
         Param::optional("line_numbers", Bool, "N numbers on each line"),
         Param::optional("line_start", Integer { min: 0, max: 1_000_000 }, "First line number"),
@@ -141,6 +150,8 @@ impl PostSettings {
             "feed_every_line": self.feed_every_line,
             "arcs": self.arcs,
             "b_letter": self.b_letter,
+            "b_g1": self.b_g1,
+            "b_feed": self.b_feed,
             "decimals": self.decimals,
             "line_numbers": self.line_numbers,
             "line_start": self.line_start,
@@ -185,6 +196,7 @@ impl PostSettings {
             ("percent", &mut s.percent),
             ("return_home", &mut s.return_home),
             ("square_b", &mut s.square_b),
+            ("b_g1", &mut s.b_g1),
         ] {
             if let Some(b) = flag(k)? {
                 *slot = b;
@@ -192,6 +204,9 @@ impl PostSettings {
         }
         if let Some(v) = params::opt_f64(p, "preheat", 0.0, 600.0)? {
             s.preheat = v;
+        }
+        if let Some(v) = params::opt_f64(p, "b_feed", 0.001, 1.0e6)? {
+            s.b_feed = v;
         }
         match p.get("decimals") {
             Some(Value::Null) => s.decimals = None,
@@ -324,15 +339,17 @@ impl Out<'_> {
         }
     }
 
-    /// A G0/G1 with the words that changed (all of X, Y and the G word when asked for).
+    /// A G0/G1 with the words that changed (all of X, Y and the G word when asked for). A rapid
+    /// that turns the table is a G1 at the B feed when the settings ask for it.
     fn linear(&mut self, g: u8, x: &str, y: &str, b: Option<String>) {
         let mut s = String::new();
-        let moved = self.x.as_deref() != Some(x)
-            || self.y.as_deref() != Some(y)
-            || b.as_ref().is_some_and(|b| self.b.as_deref() != Some(b.as_str()));
+        let turns = b.as_ref().is_some_and(|b| self.b.as_deref() != Some(b.as_str()));
+        let moved = self.x.as_deref() != Some(x) || self.y.as_deref() != Some(y) || turns;
         if !moved {
             return;
         }
+        let b_feed = (g == 0 && turns && self.s.b_g1).then(|| trim(format!("{:.2}", self.s.b_feed)));
+        let g = if b_feed.is_some() { 1 } else { g };
         if self.s.motion_every_line || self.motion != Some(g) {
             let _ = write!(s, "G{g}");
             self.motion = Some(g);
@@ -351,7 +368,12 @@ impl Out<'_> {
             let _ = write!(s, " {}{b}", self.s.b_letter);
             self.b = Some(b);
         }
-        if g == 1 {
+        if let Some(f) = b_feed {
+            if self.s.feed_every_line || self.f.as_deref() != Some(f.as_str()) {
+                let _ = write!(s, " F{f}");
+            }
+            self.f = Some(f);
+        } else if g == 1 {
             s.push_str(&self.take_feed());
         }
         self.line(s.trim());
@@ -394,7 +416,14 @@ fn ascii(s: &str) -> String {
         .collect()
 }
 
-pub fn post(machine: &Machine, stock: &Stock, cuts: &[Cut], ops: &[Operation], job_name: &str) -> Posted {
+pub fn post(
+    machine: &Machine,
+    origin: Origin,
+    stock: &Stock,
+    cuts: &[Cut],
+    ops: &[Operation],
+    job_name: &str,
+) -> Posted {
     let settings = &machine.post;
     let prog = Program::build(machine, stock, cuts, ops);
     let op_at = |i: usize| prog.op_starts.iter().find(|(at, _)| *at == i).and_then(|(_, o)| Some((*o, ops.get(*o)?)));
@@ -432,6 +461,7 @@ pub fn post(machine: &Machine, stock: &Stock, cuts: &[Cut], ops: &[Operation], j
     }
     out.comment(&format!("CosmicCut program: {job_name}"));
     out.comment(&format!("Machine: {}", machine.name));
+    out.comment(&format!("Origin: {}", origin.label()));
     out.comment(&format!("Stock: {}", stock.describe(units)));
     let active = cuts.iter().filter(|c| c.error.is_none() && !c.path.moves.is_empty()).count();
     out.comment(&format!("{active} cuts, about {}", fmt_time(prog.duration() + settings.preheat)));
@@ -458,12 +488,12 @@ pub fn post(machine: &Machine, stock: &Stock, cuts: &[Cut], ops: &[Operation], j
     // From home to where the first cut begins (over the stock only if it is in the way), then
     // heat the wire there.
     for (_, m) in prog.moves.iter().take(prog.approach_end) {
-        let (x, y) = machine.machine_xy(m.to.u, m.to.h);
+        let (x, y) = machine.program_xy(origin, m.to.u, m.to.h);
         let b = machine.b_axis.then(|| deg(machine.machine_b(m.to.b)));
         out.linear(0, &num(x), &num(y), b);
     }
     if prog.approach_end == 0 {
-        let (x0, y0) = machine.machine_xy(prog.start.u, prog.start.h);
+        let (x0, y0) = machine.program_xy(origin, prog.start.u, prog.start.h);
         let b0 = machine.b_axis.then(|| deg(machine.machine_b(prog.start.b)));
         out.linear(0, &num(x0), &num(y0), b0);
     }
@@ -549,7 +579,7 @@ pub fn post(machine: &Machine, stock: &Stock, cuts: &[Cut], ops: &[Operation], j
             }
             if j > i + 2 {
                 let xy = |u: f64, h: f64| {
-                    let (x, y) = machine.machine_xy(u, h);
+                    let (x, y) = machine.program_xy(origin, u, h);
                     DVec3::new(x, y, 0.0)
                 };
                 let pts: Vec<DVec3> =
@@ -584,7 +614,7 @@ pub fn post(machine: &Machine, stock: &Stock, cuts: &[Cut], ops: &[Operation], j
                 continue;
             }
         }
-        let (x, y) = machine.machine_xy(m.to.u, m.to.h);
+        let (x, y) = machine.program_xy(origin, m.to.u, m.to.h);
         let b = machine.b_axis.then(|| deg(machine.machine_b(m.to.b)));
         match m.kind {
             MoveKind::Rapid | MoveKind::Rotate => out.linear(0, &num(x), &num(y), b),

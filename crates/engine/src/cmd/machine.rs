@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use super::{CommandSpec, Param, ParamKind, Placement, RibbonTab, always};
 use crate::error::{EngineError, EngineResult};
 use crate::library::{NamedPost, check_name};
-use crate::machine::{Machine, PARAMS};
+use crate::machine::{Machine, Origin, PARAMS};
 use crate::params;
 use crate::post::PostSettings;
 use crate::session::Session;
@@ -48,6 +48,30 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
             s.library.touch();
             set_machine(s, m);
             Ok(s.job.machine.to_json())
+        },
+    },
+    CommandSpec {
+        id: "origin.set",
+        label: "Origin",
+        tooltip: "Where the program's X0 Y0 is: machine zero, or the turntable's axis at the table top",
+        placement: None,
+        icon: Some("job_origin"),
+        shortcut: None,
+        params: &[
+            Param::required("at", ParamKind::Choice(Origin::IDS), "machine (machine 0,0) or table (turntable 0,0)"),
+            Param::optional("id", ParamKind::Str, "Ignored (the explorer sends its row's id)"),
+        ],
+        returns: "{at}",
+        enabled: always,
+        run: |s, p| {
+            let at = params::req_str(p, "at")?;
+            let origin = Origin::from_id(at)
+                .ok_or_else(|| EngineError::InvalidParams(format!("`at` must be machine or table, not `{at}`")))?;
+            if origin != s.job.origin {
+                s.job.origin = origin;
+                s.job.touch();
+            }
+            Ok(json!({ "at": origin.id() }))
         },
     },
     CommandSpec {

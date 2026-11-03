@@ -266,6 +266,7 @@ impl Default for ViewState {
 }
 
 pub const MACHINE_ID: &str = "machine";
+pub const ORIGIN_ID: &str = "origin";
 pub const STOCK_ID: &str = "stock";
 pub const SHAPES_ID: &str = "shapes";
 pub const MODELS_ID: &str = "models";
@@ -278,6 +279,8 @@ pub struct JobState {
     /// The file it was opened from or saved to.
     pub path: Option<String>,
     pub machine: Machine,
+    /// Where the program's X0 Y0 is.
+    pub origin: crate::machine::Origin,
     pub stock: Stock,
     pub shapes: Vec<Shape>,
     pub models: Vec<crate::model::Model>,
@@ -301,6 +304,7 @@ impl Default for JobState {
             name: "Untitled".into(),
             path: None,
             machine: Machine::default(),
+            origin: crate::machine::Origin::default(),
             stock: Stock::default(),
             shapes: Vec::new(),
             models: Vec::new(),
@@ -680,6 +684,13 @@ impl Session {
             icon: Some("machine_edit"),
             ..Default::default()
         };
+        let origin = OutlineNode {
+            id: ORIGIN_ID.into(),
+            label: format!("Origin: {}", job.origin.label()),
+            properties: vec![("Program X0 Y0".into(), job.origin.describe().into())],
+            icon: Some("job_origin"),
+            ..Default::default()
+        };
         let stock = OutlineNode {
             id: STOCK_ID.into(),
             label: format!("Stock: {}", job.stock.describe(units)),
@@ -790,7 +801,7 @@ impl Session {
             id: "job".into(),
             label: format!("{}{}", job.name, if job.is_modified() { " •" } else { "" }),
             children: {
-                let mut c = vec![machine, stock, models];
+                let mut c = vec![machine, origin, stock, models];
                 // Shapes show once there are some.
                 if !job.shapes.is_empty() {
                     c.push(shapes);
