@@ -2,6 +2,7 @@
 
 ## 0.4.0
 
+- The download files carry the version in their names, e.g. `CosmicCut-0.4.0-windows-x64-setup.exe`.
 - **A swarf cut takes faces from any models,** not only the selected one: click faces on any
   model in the viewport. Each model's passes keep clear of the others in the cut and of every
   other model, unless they are listed as off the table.

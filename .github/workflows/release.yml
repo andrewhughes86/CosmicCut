@@ -50,7 +50,7 @@ jobs:
           version="${TAG#v}"
           strip target/release/CosmicCut
           # tar.gz: the program, its menu entry and icon, and an installer for one user.
-          dir=CosmicCut-linux-x86_64
+          dir=CosmicCut-$version-linux-x86_64
           mkdir -p $dir
           cp target/release/CosmicCut packaging/linux/cosmiccut.desktop packaging/linux/install.sh $dir/
           cp assets/icons/app/cosmiccut.svg README.md LICENSE-MIT LICENSE-APACHE ATTRIBUTION.md $dir/
@@ -77,13 +77,13 @@ jobs:
            Import or sketch shapes, set up cuts, simulate them and post G-code
            for hot-wire foam cutters with a B-axis turntable.
           CONTROL
-          dpkg-deb --build --root-owner-group $root CosmicCut-linux-amd64.deb
+          dpkg-deb --build --root-owner-group $root CosmicCut-$version-linux-amd64.deb
       - uses: actions/upload-artifact@v4
         with:
           name: linux
           path: |
-            CosmicCut-linux-x86_64.tar.gz
-            CosmicCut-linux-amd64.deb
+            CosmicCut-*-linux-x86_64.tar.gz
+            CosmicCut-*-linux-amd64.deb
 
   macos:
     needs: icons
@@ -117,11 +117,11 @@ jobs:
           # Ad-hoc signature: Apple silicon will not run an unsigned binary at all.
           codesign --force --deep --sign - $app
           ln -s /Applications dist/Applications
-          hdiutil create -volname CosmicCut -srcfolder dist -ov -format UDZO CosmicCut-macos-universal.dmg
+          hdiutil create -volname CosmicCut -srcfolder dist -ov -format UDZO CosmicCut-$version-macos-universal.dmg
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: CosmicCut-macos-universal.dmg
+          path: CosmicCut-*-macos-universal.dmg
 
   windows:
     needs: icons
@@ -141,7 +141,7 @@ jobs:
           $version = $env:TAG.TrimStart('v')
           New-Item -ItemType Directory -Force -Path stage | Out-Null
           Copy-Item target/release/CosmicCut.exe, icons/cosmiccut.ico, README.md, LICENSE-MIT, LICENSE-APACHE, ATTRIBUTION.md stage/
-          Compress-Archive -Path stage/* -DestinationPath CosmicCut-windows-x64.zip -Force
+          Compress-Archive -Path stage/* -DestinationPath "CosmicCut-$version-windows-x64.zip" -Force
           choco install innosetup -y --no-progress
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DVersion=$version" "/DSource=$PWD\stage" "/O$PWD" packaging/windows/cosmiccut.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -149,8 +149,8 @@ jobs:
         with:
           name: windows
           path: |
-            CosmicCut-windows-x64-setup.exe
-            CosmicCut-windows-x64.zip
+            CosmicCut-*-windows-x64-setup.exe
+            CosmicCut-*-windows-x64.zip
 
   release:
     needs: [linux, macos, windows]
@@ -173,7 +173,7 @@ jobs:
           m = re.search(r"^## " + re.escape(version) + r"\s*$(.*?)(?=^## |\Z)", log, re.M | re.S)
           changes = m.group(1).strip() if m else "See CHANGELOG.md."
           notes = open("packaging/release-notes.md", encoding="utf-8").read()
-          notes = notes.replace("@TAG@", tag).replace("@CHANGES@", changes)
+          notes = notes.replace("@TAG@", tag).replace("@VERSION@", version).replace("@CHANGES@", changes)
           open("notes.md", "w", encoding="utf-8").write(notes)
           PY
       - uses: softprops/action-gh-release@v2

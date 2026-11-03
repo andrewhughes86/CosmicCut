@@ -8,10 +8,10 @@ CAM for XYB hot-wire foam cutters: import or sketch shapes, set up cuts, simulat
 
 | System | File |
 | --- | --- |
-| **Windows** 10/11 (64-bit) | [Installer](https://github.com/andrewhughes86/CosmicCut/releases/download/@TAG@/CosmicCut-windows-x64-setup.exe) · [Portable zip](https://github.com/andrewhughes86/CosmicCut/releases/download/@TAG@/CosmicCut-windows-x64.zip) |
-| **macOS** 11+ (Apple silicon and Intel) | [Disk image (.dmg)](https://github.com/andrewhughes86/CosmicCut/releases/download/@TAG@/CosmicCut-macos-universal.dmg) |
-| **Linux** x86-64, Debian/Ubuntu | [.deb package](https://github.com/andrewhughes86/CosmicCut/releases/download/@TAG@/CosmicCut-linux-amd64.deb) |
-| **Linux** x86-64, any | [tar.gz](https://github.com/andrewhughes86/CosmicCut/releases/download/@TAG@/CosmicCut-linux-x86_64.tar.gz) |
+| **Windows** 10/11 (64-bit) | [Installer](https://github.com/andrewhughes86/CosmicCut/releases/download/@TAG@/CosmicCut-@VERSION@-windows-x64-setup.exe) · [Portable zip](https://github.com/andrewhughes86/CosmicCut/releases/download/@TAG@/CosmicCut-@VERSION@-windows-x64.zip) |
+| **macOS** 11+ (Apple silicon and Intel) | [Disk image (.dmg)](https://github.com/andrewhughes86/CosmicCut/releases/download/@TAG@/CosmicCut-@VERSION@-macos-universal.dmg) |
+| **Linux** x86-64, Debian/Ubuntu | [.deb package](https://github.com/andrewhughes86/CosmicCut/releases/download/@TAG@/CosmicCut-@VERSION@-linux-amd64.deb) |
+| **Linux** x86-64, any | [tar.gz](https://github.com/andrewhughes86/CosmicCut/releases/download/@TAG@/CosmicCut-@VERSION@-linux-x86_64.tar.gz) |
 | **Browser** | [Run it on the web](https://andrewhughes86.github.io/CosmicCut/) — nothing to install |
 
 ## Installing
@@ -22,7 +22,7 @@ CAM for XYB hot-wire foam cutters: import or sketch shapes, set up cuts, simulat
   first time, right-click (or Control-click) CosmicCut in Applications and choose **Open**, then
   **Open** again. If macOS says the app is damaged, run
   `xattr -dr com.apple.quarantine /Applications/CosmicCut.app` in Terminal.
-- **Linux (.deb):** `sudo apt install ./CosmicCut-linux-amd64.deb`, then start CosmicCut from the
+- **Linux (.deb):** `sudo apt install ./CosmicCut-@VERSION@-linux-amd64.deb`, then start CosmicCut from the
   app menu or with `cosmiccut`.
 - **Linux (tar.gz):** unpack it and run `./CosmicCut`; `./install.sh` adds it to your app menu
   for your user.

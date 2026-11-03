@@ -11,13 +11,17 @@ foam come away in the simulation, and post G-code for the machine.
 
 ## Download
 
-| System | Download |
+Download the file for your system from the
+**[latest release](https://github.com/andrewhughes86/CosmicCut/releases/latest)** (the version is
+in each file's name, e.g. `CosmicCut-0.4.0-windows-x64-setup.exe`):
+
+| System | File |
 | --- | --- |
-| Windows 10/11, 64-bit | [Installer (.exe)](https://github.com/andrewhughes86/CosmicCut/releases/latest/download/CosmicCut-windows-x64-setup.exe) · [Portable (.zip)](https://github.com/andrewhughes86/CosmicCut/releases/latest/download/CosmicCut-windows-x64.zip) |
-| macOS 11 or later, Apple silicon and Intel | [Disk image (.dmg)](https://github.com/andrewhughes86/CosmicCut/releases/latest/download/CosmicCut-macos-universal.dmg) |
-| Linux x86-64, Debian / Ubuntu | [Package (.deb)](https://github.com/andrewhughes86/CosmicCut/releases/latest/download/CosmicCut-linux-amd64.deb) |
-| Linux x86-64, any distribution | [Archive (.tar.gz)](https://github.com/andrewhughes86/CosmicCut/releases/latest/download/CosmicCut-linux-x86_64.tar.gz) |
-| Any modern browser | [andrewhughes86.github.io/CosmicCut](https://andrewhughes86.github.io/CosmicCut/) |
+| Windows 10/11, 64-bit | `CosmicCut-<version>-windows-x64-setup.exe` (installer) or `…-windows-x64.zip` (portable) |
+| macOS 11 or later, Apple silicon and Intel | `CosmicCut-<version>-macos-universal.dmg` |
+| Linux x86-64, Debian / Ubuntu | `CosmicCut-<version>-linux-amd64.deb` |
+| Linux x86-64, any distribution | `CosmicCut-<version>-linux-x86_64.tar.gz` |
+| Any modern browser | [andrewhughes86.github.io/CosmicCut](https://andrewhughes86.github.io/CosmicCut/), nothing to install |
 
 Every version is on the [releases page](https://github.com/andrewhughes86/CosmicCut/releases);
 what changed in each is in [CHANGELOG.md](CHANGELOG.md).
@@ -30,7 +34,7 @@ what changed in each is in [CHANGELOG.md](CHANGELOG.md).
   so the first time you open it, right-click it in Applications and choose **Open**, then
   **Open** again. If macOS says the app is damaged, run
   `xattr -dr com.apple.quarantine /Applications/CosmicCut.app` in Terminal.
-- **Linux:** `sudo apt install ./CosmicCut-linux-amd64.deb`, then start CosmicCut from the app
+- **Linux:** `sudo apt install ./CosmicCut-<version>-linux-amd64.deb`, then start CosmicCut from the app
   menu or run `cosmiccut`. From the .tar.gz, unpack it and run `./CosmicCut`, or run
   `./install.sh` to add it to your app menu (for your user only).
 - **Browser:** works in browsers with WebGPU or WebGL 2. Open and Import upload a file into the
