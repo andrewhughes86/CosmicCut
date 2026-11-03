@@ -157,8 +157,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The installers only: the icons artifact is for building them, not for the release.
       - uses: actions/download-artifact@v4
         with:
+          pattern: "{linux,macos,windows}"
           path: out
           merge-multiple: true
       - name: Release notes
