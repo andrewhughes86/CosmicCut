@@ -1,5 +1,6 @@
 # Builds the installers for Linux, macOS and Windows and publishes them as a GitHub release.
-# Runs when a version tag is pushed: git tag v0.1.0 && git push origin v0.1.0
+# Runs when a version tag is pushed: git tag v0.2.0 && git push origin v0.2.0
+# The notes are packaging/release-notes.md with that version's section of CHANGELOG.md.
 name: Release
 
 on:
@@ -8,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to (re)build, e.g. v0.1.0"
+        description: "Existing tag to (re)build, e.g. v0.2.0"
         required: true
 
 permissions:
@@ -161,7 +162,18 @@ jobs:
           path: out
           merge-multiple: true
       - name: Release notes
-        run: sed "s/@TAG@/$TAG/g" packaging/release-notes.md > notes.md
+        run: |
+          python3 - <<'PY'
+          import os, re
+          tag = os.environ["TAG"]
+          version = tag.lstrip("v")
+          log = open("CHANGELOG.md", encoding="utf-8").read()
+          m = re.search(r"^## " + re.escape(version) + r"\s*$(.*?)(?=^## |\Z)", log, re.M | re.S)
+          changes = m.group(1).strip() if m else "See CHANGELOG.md."
+          notes = open("packaging/release-notes.md", encoding="utf-8").read()
+          notes = notes.replace("@TAG@", tag).replace("@CHANGES@", changes)
+          open("notes.md", "w", encoding="utf-8").write(notes)
+          PY
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}

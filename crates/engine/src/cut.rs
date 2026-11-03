@@ -39,10 +39,12 @@ pub enum CutKind {
     Slab,
     /// A profile of a 3D model at every rotation.
     Model,
+    /// The wire along selected faces of a model, X, Y and B moving together.
+    Swarf,
 }
 
 impl CutKind {
-    pub const ALL: [Self; 5] = [Self::Model, Self::Profile, Self::TwoView, Self::Lathe, Self::Slab];
+    pub const ALL: [Self; 6] = [Self::Model, Self::Swarf, Self::Profile, Self::TwoView, Self::Lathe, Self::Slab];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -51,6 +53,7 @@ impl CutKind {
             Self::Lathe => "lathe",
             Self::Slab => "slab",
             Self::Model => "model",
+            Self::Swarf => "swarf",
         }
     }
 
@@ -66,6 +69,7 @@ impl CutKind {
             Self::Lathe => "cut.lathe",
             Self::Slab => "cut.slab",
             Self::Model => "cut.model",
+            Self::Swarf => "cut.swarf",
         }
     }
 
@@ -80,12 +84,14 @@ impl CutKind {
             Self::Lathe => "Lathe",
             Self::Slab => "Slabs",
             Self::Model => "From model",
+            Self::Swarf => "Swarf",
         }
     }
 }
 
 /// A region a cut keeps, in the cut plane at table angle `b`: inside the outlines (or outside
-/// them, with `outside`), extruded along the wire.
+/// them, with `outside`), extruded along the wire. A swarf pass keeps one side of the surface
+/// its wire swept instead (`sweep`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Keep {
     pub b: f64,
@@ -93,6 +99,37 @@ pub struct Keep {
     pub outside: bool,
     /// The cut's move after which the waste falls away.
     pub at: usize,
+    pub sweep: Option<Sweep>,
+}
+
+/// The surface a swarf pass swept: at each height the wire's line, and the part on one side of
+/// it. Below the lowest line the wire left level, so everything there stays.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sweep {
+    /// The face's line (`u` across at table angle `b`) at each height, from the bottom up.
+    pub lines: Vec<WirePos>,
+    /// The waste is on the +u side of the line (1) or the −u side (−1).
+    pub waste: f64,
+}
+
+impl Sweep {
+    /// How far `p` (table frame) is inside what stays: positive kept, negative waste.
+    pub fn inside(&self, p: glam::DVec3) -> f64 {
+        let Some(first) = self.lines.first() else { return 1.0e3 };
+        if p.z < first.h {
+            return 1.0e3;
+        }
+        let k = self.lines.partition_point(|l| l.h <= p.z);
+        let (u, b) = match (k.checked_sub(1).and_then(|i| self.lines.get(i)), self.lines.get(k)) {
+            (Some(a), Some(c)) if c.h - a.h > 1.0e-12 => {
+                let t = (p.z - a.h) / (c.h - a.h);
+                (a.u + (c.u - a.u) * t, a.b + (c.b - a.b) * t)
+            }
+            (Some(a), _) | (None, Some(a)) => (a.u, a.b),
+            (None, None) => return 1.0e3,
+        };
+        (u - p.dot(crate::wire::u_axis(b))) * self.waste
+    }
 }
 
 /// One cut in the job.
@@ -145,6 +182,8 @@ impl Cut {
         if let Some(Value::Object(p)) = Some(&self.params) {
             for (k, v) in p {
                 let shown = match v {
+                    // A swarf cut's faces: how many, not every number.
+                    Value::Array(a) if k == "faces" => a.len().to_string(),
                     Value::String(s) => s.clone(),
                     Value::Number(n) => n.as_f64().map_or_else(|| n.to_string(), |f| format!("{f:.4}")),
                     other => other.to_string(),
@@ -206,6 +245,7 @@ pub fn build(cx: &Context<'_>, kind: CutKind, p: &Value) -> EngineResult<Built> 
         CutKind::Lathe => lathe(cx, p),
         CutKind::Slab => slab(cx, p),
         CutKind::Model => model_cut(cx, p),
+        CutKind::Swarf => crate::swarf::swarf(cx, p),
     }
 }
 
@@ -274,14 +314,14 @@ pub const DIRECTIONS: &[&str] = &["ccw", "cw"];
 pub const BOTTOMS: &[&str] = &["attached", "through"];
 
 /// Shared settings of cuts.
-struct Common {
-    kerf: f64,
-    compensate: bool,
-    feed: f64,
-    clearance: f64,
+pub(crate) struct Common {
+    pub(crate) kerf: f64,
+    pub(crate) compensate: bool,
+    pub(crate) feed: f64,
+    pub(crate) clearance: f64,
 }
 
-fn common(cx: &Context<'_>, p: &Value) -> EngineResult<Common> {
+pub(crate) fn common(cx: &Context<'_>, p: &Value) -> EngineResult<Common> {
     let m = cx.machine;
     Ok(Common {
         kerf: params::opt_f64(p, "kerf", 0.0, 50.0)?.unwrap_or(m.kerf),
@@ -365,7 +405,13 @@ fn profile_pass(
     }
     // The part edge is half a kerf in from the wire.
     let part = region::offset(&wire_regions, -grow.signum() * c.kerf / 2.0, TOL);
-    out.keeps.push(Keep { b, regions: if c.compensate { regions } else { part }, outside: keep_outside, at: 0 });
+    out.keeps.push(Keep {
+        b,
+        regions: if c.compensate { regions } else { part },
+        outside: keep_outside,
+        at: 0,
+        sweep: None,
+    });
     let keep_index = out.keeps.len() - 1;
 
     let (u0, u1) = cx.stock.u_range(b);
@@ -675,7 +721,7 @@ pub fn beside(stock: &Stock, from: WirePos, to: WirePos, reach: f64) -> Option<V
 /// on the side `to` is entered from, it stays there (turning the table past the stock's reach);
 /// otherwise it goes out to the side clear of the stock's reach, up over it, turning the table
 /// there if the angle changes, and down the side `to` is entered from.
-fn travel(cx: &Context<'_>, c: &Common, path: &mut WirePath, to: WirePos, lead: &str) {
+pub(crate) fn travel(cx: &Context<'_>, c: &Common, path: &mut WirePath, to: WirePos, lead: &str) {
     let from = path.end();
     if from.uh().distance_squared(to.uh()) < 1.0e-12 && (from.b - to.b).abs() < 1.0e-9 {
         return;
@@ -735,7 +781,7 @@ pub fn park(machine: &Machine, stock: &Stock, b: f64) -> WirePos {
 
 /// Ends a cut out of the foam: where the last pass left the wire when that is beside the stock
 /// (the next cut, or the way home, goes on from there), else parked above it on the left.
-fn finish(cx: &Context<'_>, c: &Common, out: &mut Built) {
+pub(crate) fn finish(cx: &Context<'_>, c: &Common, out: &mut Built) {
     let end = out.path.end();
     let (u0, u1) = cx.stock.u_range(end.b);
     if end.u <= u0 - 1.0e-6 || end.u >= u1 + 1.0e-6 {
@@ -759,7 +805,7 @@ fn choice<'a>(p: &'a Value, key: &str, choices: &[&'a str]) -> EngineResult<&'a 
     }
 }
 
-fn needs_b(cx: &Context<'_>, angles: &[f64]) -> EngineResult<()> {
+pub(crate) fn needs_b(cx: &Context<'_>, angles: &[f64]) -> EngineResult<()> {
     if !cx.machine.b_axis && angles.iter().any(|a| a.abs() > 1.0e-9) {
         return Err(EngineError::InvalidParams("the machine has no turntable; cut at 0°".into()));
     }
@@ -924,7 +970,13 @@ fn lathe(cx: &Context<'_>, p: &Value) -> EngineResult<Built> {
         out.path.push(MoveKind::Lead, WirePos::new(reach, hb, b), c.feed);
         cap.push(DVec2::new(FAR, hb));
         cap.push(DVec2::new(FAR, FAR));
-        out.keeps.push(Keep { b, regions: vec![vec![close(cap)]], outside: true, at: out.path.moves.len() });
+        out.keeps.push(Keep {
+            b,
+            regions: vec![vec![close(cap)]],
+            outside: true,
+            at: out.path.moves.len(),
+            sweep: None,
+        });
         // Back up the outside to above the foam.
         out.path.push(MoveKind::Rapid, WirePos::new(reach, top, b), 0.0);
     }
@@ -1010,6 +1062,7 @@ fn slab(cx: &Context<'_>, p: &Value) -> EngineResult<Built> {
             regions: vec![region::rectangle(DVec2::new(-FAR, -FAR), DVec2::new(FAR, cut))],
             outside: false,
             at: out.path.moves.len(),
+            sweep: None,
         });
     }
     let slabs = heights.len() - usize::from(skim > 0.0);
@@ -1020,7 +1073,7 @@ fn slab(cx: &Context<'_>, p: &Value) -> EngineResult<Built> {
 }
 
 /// Warns when the path leaves the machine's travel.
-fn check_fits(cx: &Context<'_>, out: &mut Built) {
+pub(crate) fn check_fits(cx: &Context<'_>, out: &mut Built) {
     let m = cx.machine;
     let mut worst: Option<String> = None;
     for pos in std::iter::once(out.path.start).chain(out.path.moves.iter().map(|mv| mv.to)) {

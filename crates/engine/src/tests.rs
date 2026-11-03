@@ -743,3 +743,43 @@ fn the_program_starts_from_home_over_the_part_only_when_it_is_in_the_way() {
         "{text}"
     );
 }
+
+#[test]
+fn a_swarf_cut_turns_the_table_as_the_wire_goes_down_and_simulates() {
+    let mut s = Session::new();
+    run(&mut s, "stock.block", json!({ "width": 300.0, "depth": 300.0, "height": 200.0 }));
+    let mesh = crate::swarf::tests::twisted_block(30.0, 80);
+    let mut model = crate::model::Model::new("model.1".into(), "twist".into(), String::new(), None, mesh)
+        .unwrap_or_else(|e| panic!("{e}"));
+    model.place(s.job.stock.bottom());
+    // Its sides: the faces that rise.
+    let tris = model.mesh.triangles().to_vec();
+    let sides: Vec<usize> = (0..model.faces.faces.len())
+        .filter(|&f| {
+            let zs: Vec<f32> = model
+                .faces
+                .triangles_of(f)
+                .filter_map(|t| tris.get(t))
+                .flat_map(|t| model.mesh.corners(*t).map(|c| c.z))
+                .collect();
+            zs.iter().copied().fold(f32::MIN, f32::max) - zs.iter().copied().fold(f32::MAX, f32::min) > 1.0
+        })
+        .collect();
+    s.job.models.push(model);
+    let cut = run(&mut s, "cut.swarf", json!({ "faces": sides }));
+    assert_eq!(s.job.cuts[0].keeps.len(), 4, "{cut}");
+    assert!(s.job.cuts[0].warnings.is_empty(), "{:?}", s.job.cuts[0].warnings);
+    // X, Y and B move together on the cutting moves.
+    let text = run(&mut s, "post.gcode.preview", json!({}))["text"].as_str().unwrap_or_default().to_owned();
+    let together =
+        text.lines().filter(|l| !l.starts_with("G0") && l.contains('X') && l.contains('Y') && l.contains('B'));
+    assert!(together.count() > 50, "{text}");
+    // The waste falls away round the twisted block (and the column of foam above it).
+    run(&mut s, "sim.jump.end", json!({}));
+    let left = run(&mut s, "sim.get", json!({}))["foam_volume"].as_f64().unwrap_or(0.0);
+    assert!(left > 0.9e6 && left < 1.5e6, "{left}");
+    // The cut is saved with its faces and comes back the same.
+    let saved = crate::jobfile::to_json(&s.job);
+    let back = crate::jobfile::from_json(&saved).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(back.cuts.first().map(|c| c.kind), Some(crate::cut::CutKind::Swarf));
+}

@@ -28,6 +28,8 @@ pub struct Model {
     raw: Arc<Mesh>,
     /// Its faces, recognised on the mesh as read (triangle indices match the placed mesh).
     pub faces: Arc<FaceMap>,
+    /// Which faces share an edge, worked out when first wanted.
+    neighbours: Arc<std::sync::OnceLock<Vec<Vec<usize>>>>,
     /// The direction, in the model as read, that points down onto the table.
     pub down: DVec3,
     /// Turn about the table's axis after laying it down, degrees.
@@ -65,6 +67,7 @@ impl Model {
             mesh: Arc::clone(&raw),
             raw,
             faces,
+            neighbours: Arc::default(),
             down: DVec3::NEG_Z,
             rotate: 0.0,
             scale: 1.0,
@@ -118,6 +121,42 @@ impl Model {
             Some(f) => self.faces.triangles_of(f).collect(),
             None => vec![triangle],
         }
+    }
+
+    /// The faces that share an edge with each face, by face. Worked out once per model.
+    pub fn face_neighbours(&self) -> &[Vec<usize>] {
+        self.neighbours.get_or_init(|| {
+            let count = self.faces.faces.len();
+            let mut out: Vec<Vec<usize>> = vec![Vec::new(); count];
+            let key =
+                |v: Vec3| [(v.x * 1.0e3).round() as i64, (v.y * 1.0e3).round() as i64, (v.z * 1.0e3).round() as i64];
+            let tris = self.raw.triangles();
+            let mut edges: std::collections::HashMap<([i64; 3], [i64; 3]), usize> =
+                std::collections::HashMap::with_capacity(tris.len() * 2);
+            for (t, idx) in tris.iter().enumerate() {
+                let Some(f) = self.faces.face_of(t) else { continue };
+                let [a, b, c] = self.raw.corners(*idx).map(key);
+                for (p, q) in [(a, b), (b, c), (c, a)] {
+                    let edge = if p < q { (p, q) } else { (q, p) };
+                    match edges.get(&edge).copied() {
+                        Some(g) if g != f => {
+                            for (x, y) in [(f, g), (g, f)] {
+                                if let Some(list) = out.get_mut(x)
+                                    && !list.contains(&y)
+                                {
+                                    list.push(y);
+                                }
+                            }
+                        }
+                        Some(_) => {}
+                        None => {
+                            edges.insert(edge, f);
+                        }
+                    }
+                }
+            }
+            out
+        })
     }
 
     pub fn bounds(&self) -> Aabb {

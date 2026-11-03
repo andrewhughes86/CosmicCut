@@ -40,11 +40,15 @@ const MENU_HEIGHT: f32 = 28.0;
 
 /// The menu bar, the ribbon's tabs under it, and the ribbon. `panes` are the panes open now,
 /// ticked in the View menu.
-pub fn show(ui: &mut Ui, session: &Session, tokens: &Tokens, panes: &[Pane], requests: &mut Vec<Request>) {
+/// The menu bar, and under it (with `full`; not on the start page) the tabs and their buttons.
+pub fn show(ui: &mut Ui, session: &Session, tokens: &Tokens, panes: &[Pane], full: bool, requests: &mut Vec<Request>) {
     let active = session.ui.ribbon_tab;
     Panel::top("ribbon", Surface::Ribbon).show(ui, tokens, |ui| {
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
         menu_bar(ui, session, tokens, panes, requests);
+        if !full {
+            return;
+        }
         tab_strip(ui, tokens, active, requests);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
@@ -110,6 +114,11 @@ fn command_item(ui: &mut Ui, session: &Session, id: &str, label: &str, requests:
 }
 
 fn file_menu(ui: &mut Ui, session: &Session, requests: &mut Vec<Request>) {
+    if ui.button("Home").clicked() {
+        requests.push(("ui.home".into(), Value::Null));
+        ui.close();
+    }
+    ui.separator();
     command_item(ui, session, "job.new", "New", requests);
     command_item(ui, session, "job.open", "Open…", requests);
     command_item(ui, session, "job.save", "Save", requests);

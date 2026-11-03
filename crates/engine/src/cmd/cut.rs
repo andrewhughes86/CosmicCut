@@ -192,6 +192,32 @@ pub const MODEL_PARAMS: &[Param] = &[
     FEED,
 ];
 
+pub const SWARF_PARAMS: &[Param] = &[
+    ID,
+    NAME,
+    Param::optional("model", ParamKind::Str, "The model (default the imported one)"),
+    Param::required(
+        "faces",
+        ParamKind::IntList { max: crate::swarf::MAX_FACES },
+        "The model's faces for the wire to follow (face numbers). Faces that line up are cut in one pass, the \
+         rest each in their own",
+    ),
+    Param::optional(
+        "height_step",
+        ParamKind::Length { min: 0.05, max: 1000.0 },
+        "Height between the wire positions down the faces; smaller follows twisting faces more closely (default 2 mm)",
+    ),
+    Param::optional(
+        "tolerance",
+        ParamKind::Length { min: 0.001, max: 50.0 },
+        "How far the faces' level slices may be off a straight line (default 0.25 mm)",
+    ),
+    KERF,
+    COMPENSATE,
+    FEED,
+    CLEARANCE,
+];
+
 pub const SLAB_PARAMS: &[Param] = &[
     ID,
     NAME,
@@ -258,6 +284,19 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         returns: "cut",
         enabled: |s| !s.job.models.is_empty(),
         run: |s, p| create(s, CutKind::Model, p),
+    },
+    CommandSpec {
+        id: "cut.swarf",
+        label: "Swarf",
+        tooltip: "Lay the wire along faces of the model: X, Y and B move together, so it follows tapered, twisted \
+                  and turning faces made of level straight lines",
+        placement: Some(Placement::gallery(RibbonTab::Cuts, "Cuts")),
+        icon: None,
+        shortcut: None,
+        params: SWARF_PARAMS,
+        returns: "cut",
+        enabled: |s| !s.job.models.is_empty(),
+        run: |s, p| create(s, CutKind::Swarf, p),
     },
     CommandSpec {
         id: "cut.edit",
@@ -541,5 +580,6 @@ pub fn params_of(kind: CutKind) -> &'static [Param] {
         CutKind::Lathe => LATHE_PARAMS,
         CutKind::Slab => SLAB_PARAMS,
         CutKind::Model => MODEL_PARAMS,
+        CutKind::Swarf => SWARF_PARAMS,
     }
 }

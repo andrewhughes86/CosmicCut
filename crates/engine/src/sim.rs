@@ -208,6 +208,10 @@ pub fn foam(stock: &Stock) -> Option<Voxels> {
 
 /// Keeps only the foam inside `keep`'s region.
 pub fn apply(v: &mut Voxels, keep: &Keep) {
+    if let Some(sweep) = &keep.sweep {
+        v.intersect(|p| sweep.inside(p));
+        return;
+    }
     let cell = v.cell();
     let band = cell * 2.5;
     // The cut plane's extent over the voxels at this angle.

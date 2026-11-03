@@ -14,6 +14,7 @@ mod app;
 mod automation;
 mod cut_panel;
 mod dock;
+mod home;
 pub mod icon_svg;
 mod library_dialog;
 mod machine_panel;

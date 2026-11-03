@@ -1,5 +1,9 @@
 CAM for XYB hot-wire foam cutters: import or sketch shapes, set up cuts, simulate them, and post G-code.
 
+## What's new
+
+@CHANGES@
+
 ## Download
 
 | System | File |

@@ -147,6 +147,10 @@ pub enum ParamKind {
     Objects {
         max: usize,
     },
+    /// A list of up to `max` whole numbers from 0 (e.g. a model's face numbers).
+    IntList {
+        max: usize,
+    },
 }
 
 impl ParamKind {
@@ -163,6 +167,7 @@ impl ParamKind {
             Self::StrList { .. } => "list",
             Self::PointList { .. } => "points",
             Self::Objects { .. } => "objects",
+            Self::IntList { .. } => "numbers",
         }
     }
 }
@@ -212,9 +217,10 @@ impl Param {
                 v["max"] = json!(max);
             }
             ParamKind::Choice(choices) => v["choices"] = json!(choices),
-            ParamKind::StrList { max } | ParamKind::PointList { max } | ParamKind::Objects { max } => {
-                v["max_items"] = json!(max)
-            }
+            ParamKind::StrList { max }
+            | ParamKind::PointList { max }
+            | ParamKind::Objects { max }
+            | ParamKind::IntList { max } => v["max_items"] = json!(max),
             _ => {}
         }
         v
@@ -324,6 +330,11 @@ fn check_kind(p: &Param, v: &Value) -> EngineResult<()> {
             Some(s) if choices.contains(&s) => Ok(()),
             _ => bad(format!("must be one of: {}", choices.join(", "))),
         },
+        ParamKind::IntList { max } => match v.as_array() {
+            Some(a) if a.len() > max => bad(format!("has more than {max} items")),
+            Some(a) if a.iter().all(|n| n.as_u64().is_some_and(|n| n <= u64::from(u32::MAX))) => Ok(()),
+            _ => bad("must be a list of whole numbers from 0".into()),
+        },
         ParamKind::StrList { max } => match v.as_array() {
             Some(a)
                 if a.len() <= max
@@ -412,6 +423,7 @@ pub fn cut_icon(kind: CutKind) -> &'static str {
         CutKind::Lathe => "cut_lathe",
         CutKind::Slab => "cut_slab",
         CutKind::Model => "cut_model",
+        CutKind::Swarf => "cut_swarf",
     }
 }
 
@@ -421,6 +433,7 @@ const BUTTON_ORDER: &[&str] = &[
     "shape.import",
     "shape.airfoil",
     "cut.model",
+    "cut.swarf",
     "cut.profile",
     "cut.twoview",
     "cut.lathe",
@@ -444,6 +457,7 @@ pub static EXTRA_PLACEMENTS: &[(&str, Placement)] = &[
     ("machine.edit", Placement::large(RibbonTab::Home, "Setup")),
     ("sim.play", Placement::large(RibbonTab::Home, "Simulate")),
     ("cut.model", Placement::gallery(RibbonTab::Home, "Cuts")),
+    ("cut.swarf", Placement::gallery(RibbonTab::Home, "Cuts")),
     ("cut.profile", Placement::gallery(RibbonTab::Home, "Cuts")),
     ("cut.twoview", Placement::gallery(RibbonTab::Home, "Cuts")),
     ("cut.lathe", Placement::gallery(RibbonTab::Home, "Cuts")),

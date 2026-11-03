@@ -19,7 +19,8 @@ foam come away in the simulation, and post G-code for the machine.
 | Linux x86-64, any distribution | [Archive (.tar.gz)](https://github.com/andrewhughes86/CosmicCut/releases/latest/download/CosmicCut-linux-x86_64.tar.gz) |
 | Any modern browser | [andrewhughes86.github.io/CosmicCut](https://andrewhughes86.github.io/CosmicCut/) |
 
-Every version is on the [releases page](https://github.com/andrewhughes86/CosmicCut/releases).
+Every version is on the [releases page](https://github.com/andrewhughes86/CosmicCut/releases);
+what changed in each is in [CHANGELOG.md](CHANGELOG.md).
 
 **Installing**
 
@@ -48,6 +49,8 @@ Settings, machines and post processors are kept per user and carry over to new v
   generator.
 - **Cut types.** Profile (single or indexed around the table), Two-view (front and side),
   Lathe (a half profile turned on the table) and Slabs (sheets sliced from the block).
+- **Swarf cuts: X, Y and B moving together.** Click faces of a model and the wire lies along
+  them at every height while the table turns, for tapered, twisted and turning faces.
 - **The part stays put.** Cuts leave the part joined to the foam under it while the table turns,
   and a final release cut frees it.
 - **Simulation** of the whole program. The table turns with the foam on it, the waste falls
@@ -62,8 +65,14 @@ Settings, machines and post processors are kept per user and carry over to new v
 
 ## Quick start
 
-CosmicCut opens with a sample job: a penguin cut from a foam block with a profile every 22.5°.
-Press **Simulation** to watch it, then **View G-code**. To make your own job:
+CosmicCut opens on its start page: **New project**, **Open…**, the imports, your recent
+projects, and the **Sample penguin** (a penguin cut from a foam block with a profile every
+22.5°; press **Simulation** to watch it, then **View G-code**). **File → Home** brings the page
+back.
+
+![The start page](docs/start-page.png)
+
+To make your own job:
 
 1. **Machine** (Home tab): check the travel, where the turntable's axis is, the kerf and the
    feed. **Post processor** (Machine tab) sets how the G-code is written. The defaults suit a
@@ -104,6 +113,31 @@ Snaps (end points, midpoints, curves, lining up with other points or the origin)
 constraints automatically. A fully constrained sketch turns from cyan to white. Anything the
 solver can't satisfy is refused and the sketch stays as it was.
 
+## Swarf cuts
+
+A swarf cut lays the wire along faces of a model, X, Y and B all moving at once. The wire is a
+level straight line, so it can follow any face whose level slices are straight lines:
+- flat faces at any angle;
+- tapers whose angle changes;
+- twisted sides, like `samples/twisted-block.stl`;
+- helical ramps.
+
+1. Import the model, then choose **Swarf** in the cuts gallery.
+2. Click faces in the viewport. A click takes the whole surface the wire can follow from that
+   face, even if the model splits it into many small faces. **Alt-click** takes a single face,
+   and clicking a selected face again removes it. Esc or right-click ends face selection.
+3. Faces that line up are cut in one pass; the others get a pass each. A pass comes straight
+   down onto the top of its faces from above the foam, follows them down with the table turning,
+   and leaves level through the waste at the bottom.
+
+**Height step** sets how far apart the wire positions are down the faces. **Straightness
+tolerance** sets how far a face's slices may be off a straight line before the cut is refused.
+The cut warns if the wire, which runs across the whole foam, would cut into another part of the
+model.
+
+The feed is slowed where the table turns, so no point of the wire across the foam moves faster
+than the cut's feed. The G-code's F word applies to X and Y, as in LinuxCNC.
+
 ## The machine and the G-code
 
 The table frame has its origin on the turntable's axis at the table top, with Z up and the
@@ -127,7 +161,7 @@ display units, e.g. `cut.slab {"thickness": 50.8, "skim": 6.35}`.
 
 You need [Rust](https://rustup.rs) 1.88 or newer.
 
-    cargo run --release                  # opens the sample job
+    cargo run --release                  # opens on the start page
     cargo run --release -- job.ccut      # opens a job; --empty starts blank, --help lists the rest
 
 The browser version is built with [Trunk](https://trunkrs.dev):
@@ -142,8 +176,8 @@ Before sending changes:
     cargo test --workspace
 
 `AGENTS.md` has the project's rules (no panics, everything is a command, original icons).
-`samples/` has models and drawings to try: the penguin, an L-bracket, a DXF arch and an SVG
-chess-pawn half profile.
+`samples/` has models and drawings to try: the penguin, an L-bracket, a twisted block for swarf
+cuts, a DXF arch and an SVG chess-pawn half profile.
 
 ### Releases and the web version
 
@@ -152,10 +186,11 @@ chess-pawn half profile.
 - Pushing a version tag builds the Windows, macOS and Linux packages and publishes a release
   (`.github/workflows/release.yml`; the packaging files are in `packaging/`):
 
-      git tag v0.1.0
-      git push origin v0.1.0
+      git tag v0.2.0
+      git push origin v0.2.0
 
-  Bump `version` in the root `Cargo.toml` first for a new version.
+  For a new version, first bump `version` in the root `Cargo.toml` and add its section to
+  `CHANGELOG.md`; the release notes start with that section.
 
 ### Layout
 

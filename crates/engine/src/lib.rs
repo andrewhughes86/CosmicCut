@@ -32,6 +32,7 @@ pub mod shape;
 pub mod sim;
 pub mod sketch;
 pub mod stock;
+pub mod swarf;
 pub mod units;
 pub mod wire;
 

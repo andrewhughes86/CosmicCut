@@ -15,6 +15,7 @@ use crate::Request;
 use crate::automation::{self, Automation};
 use crate::cut_panel::CutPanel;
 use crate::dock::{self, Tab};
+use crate::home;
 use crate::panes::{ConsoleState, GcodeState};
 use crate::ribbon;
 use crate::theme::{self, Tokens};
@@ -29,6 +30,8 @@ pub struct LaunchOptions {
     /// Keep nothing between runs: scripted and screenshot runs leave the operator's settings,
     /// machines and post processors as they were.
     pub ephemeral: bool,
+    /// Open on the start page.
+    pub home: bool,
 }
 
 pub struct CosmicApp {
@@ -59,6 +62,12 @@ pub struct CosmicApp {
     settings_open: bool,
     /// Help → About is open.
     about_open: bool,
+    /// The start page is showing instead of the workspace.
+    home: bool,
+    home_page: home::Home,
+    /// Jobs opened or saved lately, newest first, and the list as last written to storage.
+    recent: Vec<String>,
+    saved_recent: Vec<String>,
     /// File → Close is waiting for Save, Close without saving or Cancel.
     confirm_close: bool,
     /// File → Exit was chosen: the window closes at the end of the frame.
@@ -93,8 +102,9 @@ const LIBRARY_KEY: &str = "cosmiccut.library";
 
 impl CosmicApp {
     pub fn new(cc: &eframe::CreationContext<'_>, mut session: Session, options: LaunchOptions) -> Self {
-        let LaunchOptions { automation, ephemeral } = options;
+        let LaunchOptions { automation, ephemeral, home } = options;
         let mut bottom = Pane::Console;
+        let mut recent: Vec<String> = Vec::new();
         if let Some(saved) =
             cc.storage.and_then(|s| s.get_string(SETTINGS_KEY)).and_then(|t| serde_json::from_str::<Value>(&t).ok())
         {
@@ -109,6 +119,11 @@ impl CosmicApp {
             if let Some(pane) = saved.get("bottom").and_then(Value::as_str).and_then(Pane::from_id) {
                 bottom = pane;
             }
+            recent = saved
+                .get("recent")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).take(home::MAX_RECENT).map(str::to_owned).collect())
+                .unwrap_or_default();
         }
         // The machine last used, unless the session already has a job of its own.
         if session.job.cuts.is_empty()
@@ -175,6 +190,10 @@ impl CosmicApp {
             op_dialog: None,
             settings_open: false,
             about_open: false,
+            home,
+            home_page: home::Home::default(),
+            saved_recent: recent.clone(),
+            recent,
             confirm_close: false,
             quit: false,
             saved_prefs,
@@ -308,6 +327,26 @@ impl CosmicApp {
             self.about_open = true;
             return;
         }
+        // The start page: open it, leave it, or start a new job from it (in place of an empty
+        // job, rather than beside it).
+        match id {
+            "ui.home" => {
+                self.home = true;
+                return;
+            }
+            "ui.home.close" => {
+                self.home = false;
+                return;
+            }
+            "ui.home.new" => {
+                if !self.job_is_blank() {
+                    self.run("job.new", &Value::Null);
+                }
+                self.home = false;
+                return;
+            }
+            _ => {}
+        }
         if id == "ui.quit" {
             self.quit = true;
             return;
@@ -381,6 +420,10 @@ impl CosmicApp {
                 self.notice = notice(id, &result).or_else(|| self.notice.take().filter(|_| id == "selection.set"));
                 if id.starts_with("job.") && id != "job.save" && id != "job.save.as" {
                     self.cut_panel = None;
+                }
+                // A job opened or a model brought in from the start page goes to the workspace.
+                if LEAVES_HOME.contains(&id) {
+                    self.home = false;
                 }
             }
             Err(e) => {
@@ -669,6 +712,7 @@ impl eframe::App for CosmicApp {
                 "units": self.session.prefs.units.id(),
                 "theme": self.session.prefs.theme.id(),
                 "bottom": self.bottom.id(),
+                "recent": self.recent,
             })
             .to_string(),
         );
@@ -676,6 +720,7 @@ impl eframe::App for CosmicApp {
         storage.set_string(LIBRARY_KEY, self.session.library.to_json().to_string());
         self.saved_prefs = self.session.prefs.revision;
         self.saved_library = self.session.library.revision;
+        self.saved_recent = self.recent.clone();
     }
 
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
@@ -713,10 +758,15 @@ impl eframe::App for CosmicApp {
         self.service_capture(&ctx);
         ribbon::resize_edges(&ctx);
         let panes = dock::open_panes(&self.dock);
-        ribbon::show(ui, &self.session, tokens, &panes, &mut requests);
+        // A job with a file is one to come back to.
+        if let Some(path) = self.session.job.path.clone() {
+            home::remember(&mut self.recent, &path);
+        }
+        ribbon::show(ui, &self.session, tokens, &panes, !self.home, &mut requests);
 
         let status = self.status.clone();
-        let fps = self.viewport.fps();
+        // The frame rate is the viewport's; the start page has none.
+        let fps = if self.home { String::new() } else { format!("  ·  {:.0} fps", self.viewport.fps()) };
         Panel::bottom("status", Surface::StatusBar).show(ui, tokens, |ui| {
             ui.horizontal(|ui| {
                 match (&status, &self.notice) {
@@ -728,7 +778,7 @@ impl eframe::App for CosmicApp {
                     let m = &self.session.job.machine;
                     ui.label(
                         RichText::new(format!(
-                            "{}  ·  {}  ·  {}  ·  program in {}  ·  {fps:.0} fps",
+                            "{}  ·  {}  ·  {}  ·  program in {}{fps}",
                             m.name,
                             if m.b_axis { "X Y B" } else { "X Y" },
                             self.session.prefs.units.length(),
@@ -747,49 +797,58 @@ impl eframe::App for CosmicApp {
             let _ = self.session.execute("view.camera.front", &json!({}));
         }
         self.viewport.pick_start = picking;
+        self.viewport.face_pick = self.cut_panel.as_ref().and_then(|p| p.face_pick());
 
         let mut cut_outcome: Option<(Option<Request>, bool)> = None;
         let mut stock_done = false;
         let mut bottom: Option<Pane> = None;
         let mut side_outcome: Option<(Pane, Option<Request>, bool)> = None;
         self.viewport.stock_edit = self.stock_panel.is_some();
-        Panel::central(Surface::Workspace).show(ui, tokens, |ui| {
-            let mut style = Style::from_egui(ui.style());
-            style.tab_bar.bg_fill = tokens.raised_bg;
-            style.tab.active.bg_fill = tokens.panel_bg;
-            style.tab.focused.bg_fill = tokens.panel_bg;
-            style.tab.active.text_color = tokens.text;
-            style.tab.focused.text_color = tokens.accent;
-            style.tab.inactive.text_color = tokens.text_muted;
-            style.tab.tab_body.bg_fill = tokens.panel_bg;
-            style.tab.tab_body.stroke = egui::Stroke::new(1.0, tokens.border);
-            style.separator.color_idle = tokens.border;
-            style.separator.color_hovered = tokens.accent;
-            style.separator.color_dragged = tokens.accent;
-            style.overlay.selection_color = tokens.accent.gamma_multiply(0.35);
-            let mut viewer = dock::Viewer {
-                session: &mut self.session,
-                tokens,
-                viewport: &mut self.viewport,
-                render_state: self.render_state.as_ref(),
-                console: &mut self.console,
-                gcode: &mut self.gcode,
-                requests: &mut requests,
-                cut_panel: &mut self.cut_panel,
-                cut_outcome: &mut cut_outcome,
-                stock_panel: &mut self.stock_panel,
-                stock_done: &mut stock_done,
-                machine_panel: &mut self.machine_panel,
-                post_panel: &mut self.post_panel,
-                side_outcome: &mut side_outcome,
-                bottom: &mut bottom,
-            };
-            DockArea::new(&mut self.dock)
-                .id(egui::Id::new("workspace-dock"))
-                .style(style)
-                .show_leaf_collapse_buttons(false)
-                .show_inside(ui, &mut viewer);
-        });
+        if self.home {
+            let back = (!self.job_is_blank()).then(|| {
+                let name = self.session.job.name.trim();
+                if name.is_empty() { "the job".to_owned() } else { name.to_owned() }
+            });
+            self.home_page.show(ui, tokens, &self.recent, back.as_deref(), &mut requests);
+        } else {
+            Panel::central(Surface::Workspace).show(ui, tokens, |ui| {
+                let mut style = Style::from_egui(ui.style());
+                style.tab_bar.bg_fill = tokens.raised_bg;
+                style.tab.active.bg_fill = tokens.panel_bg;
+                style.tab.focused.bg_fill = tokens.panel_bg;
+                style.tab.active.text_color = tokens.text;
+                style.tab.focused.text_color = tokens.accent;
+                style.tab.inactive.text_color = tokens.text_muted;
+                style.tab.tab_body.bg_fill = tokens.panel_bg;
+                style.tab.tab_body.stroke = egui::Stroke::new(1.0, tokens.border);
+                style.separator.color_idle = tokens.border;
+                style.separator.color_hovered = tokens.accent;
+                style.separator.color_dragged = tokens.accent;
+                style.overlay.selection_color = tokens.accent.gamma_multiply(0.35);
+                let mut viewer = dock::Viewer {
+                    session: &mut self.session,
+                    tokens,
+                    viewport: &mut self.viewport,
+                    render_state: self.render_state.as_ref(),
+                    console: &mut self.console,
+                    gcode: &mut self.gcode,
+                    requests: &mut requests,
+                    cut_panel: &mut self.cut_panel,
+                    cut_outcome: &mut cut_outcome,
+                    stock_panel: &mut self.stock_panel,
+                    stock_done: &mut stock_done,
+                    machine_panel: &mut self.machine_panel,
+                    post_panel: &mut self.post_panel,
+                    side_outcome: &mut side_outcome,
+                    bottom: &mut bottom,
+                };
+                DockArea::new(&mut self.dock)
+                    .id(egui::Id::new("workspace-dock"))
+                    .style(style)
+                    .show_leaf_collapse_buttons(false)
+                    .show_inside(ui, &mut viewer);
+            });
+        }
         // The Cut tab's buttons: Create / Update runs the command and closes the tab; Cancel
         // closes it; closing the tab drops the edit.
         if let Some((request, keep)) = cut_outcome {
@@ -816,6 +875,16 @@ impl eframe::App for CosmicApp {
             && let Some(panel) = self.cut_panel.as_mut()
         {
             panel.take_start(picked);
+        }
+        let face = self.viewport.picked_face.take();
+        let stop = std::mem::take(&mut self.viewport.stop_face_pick);
+        if let Some(panel) = self.cut_panel.as_mut() {
+            if let Some(f) = face {
+                panel.toggle_faces(&f);
+            }
+            if stop {
+                panel.picking_faces = false;
+            }
         }
         // Save in the Machine or Post processor tab runs its command and closes the tab; Cancel
         // closes it; a failure keeps it open and says why.
@@ -894,12 +963,25 @@ impl eframe::App for CosmicApp {
             self.tools.finished(outcome);
         }
         // A changed library is written straight away, so a crash cannot lose a machine.
-        if (self.session.prefs.revision != self.saved_prefs || self.session.library.revision != self.saved_library)
+        if (self.session.prefs.revision != self.saved_prefs
+            || self.session.library.revision != self.saved_library
+            || self.recent != self.saved_recent)
             && let Some(storage) = frame.storage_mut()
         {
             self.save(storage);
             storage.flush();
         }
+    }
+}
+
+/// Commands that leave the start page for the workspace once they have run.
+const LEAVES_HOME: &[&str] = &["job.new", "job.open", "job.sample", "model.import", "shape.import"];
+
+impl CosmicApp {
+    /// The job in front has nothing in it and no file: one to replace, not keep.
+    fn job_is_blank(&self) -> bool {
+        let j = &self.session.job;
+        j.path.is_none() && !j.is_modified() && j.models.is_empty() && j.shapes.is_empty() && j.cuts.is_empty()
     }
 }
 

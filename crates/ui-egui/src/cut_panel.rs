@@ -30,7 +30,7 @@ impl Widths {
 }
 
 /// Parameters the panel carries without showing.
-const HIDDEN: &[&str] = &["id", "name", "model"];
+const HIDDEN: &[&str] = &["id", "name", "model", "faces"];
 
 /// The card a parameter shows in.
 fn section(name: &str) -> &'static str {
@@ -39,6 +39,7 @@ fn section(name: &str) -> &'static str {
         "anchor" | "x" | "y" | "scale" | "rotate" | "mirror" => "Placement",
         n if n.starts_with("front_") || n.starts_with("side_") => "Placement",
         "spacing" | "divisions" | "degrees" => "Rotations",
+        "height_step" | "tolerance" => "Faces",
         "angle" | "copies" | "step" | "sweep" => "Table",
         "thickness" | "skim" | "count" | "order" => "Slabs",
         "keep" | "lead" | "direction" | "alternate" | "start_x" | "start_y" => "Path",
@@ -47,7 +48,7 @@ fn section(name: &str) -> &'static str {
     }
 }
 
-const SECTIONS: &[&str] = &["Shape", "Rotations", "Table", "Slabs", "Path", "Bottom", "Placement", "Wire"];
+const SECTIONS: &[&str] = &["Shape", "Faces", "Rotations", "Table", "Slabs", "Path", "Bottom", "Placement", "Wire"];
 
 /// What a card is for, under its heading.
 fn intro(section: &str, kind: CutKind) -> &'static str {
@@ -56,6 +57,10 @@ fn intro(section: &str, kind: CutKind) -> &'static str {
         "Rotations" => {
             "The table turns between cuts, and at each angle the wire follows a new profile: the model's outline \
              seen from there. More cuts give a rounder part."
+        }
+        "Faces" => {
+            "Click the model's faces for the wire to follow. At every height the wire lies along them, X, Y and \
+             the table moving together; faces that line up are cut in one pass."
         }
         "Placement" => "Where the outline sits in the foam. Blank places it in the middle of the stock.",
         "Table" => "The turntable angle (B) the cut is made at. Copies repeat it at angles round the table.",
@@ -111,6 +116,8 @@ fn label(name: &str) -> String {
         "release" => "Part off at the end",
         "compensate" => "Kerf compensation",
         "feed" => "Feed rate",
+        "height_step" => "Height step",
+        "tolerance" => "Straightness tolerance",
         other => {
             let words = other.replace('_', " ");
             let mut chars = words.chars();
@@ -162,6 +169,8 @@ pub struct CutPanel {
     error: Option<String>,
     /// Waiting for the start point to be clicked in the viewport.
     pub picking_start: bool,
+    /// Faces of the model are being clicked to add or take away.
+    pub picking_faces: bool,
 }
 
 impl CutPanel {
@@ -184,6 +193,14 @@ impl CutPanel {
                 }
                 CutKind::Lathe => {
                     values.insert("step".into(), json!(5.0));
+                }
+                CutKind::Swarf => {
+                    values.insert("height_step".into(), json!(2.0));
+                    let model = session.selected_model().or(session.job.models.first()).map(|m| m.id.clone());
+                    if let Some(m) = model {
+                        values.insert("model".into(), json!(m));
+                    }
+                    values.insert("faces".into(), json!([]));
                 }
                 CutKind::Model => {
                     values.insert("divisions".into(), json!(8));
@@ -269,7 +286,45 @@ impl CutPanel {
             preview: None,
             error: None,
             picking_start: false,
+            picking_faces: false,
         }
+        .picking_faces_if_none()
+    }
+
+    /// A new swarf cut starts with its faces being picked.
+    fn picking_faces_if_none(mut self) -> Self {
+        self.picking_faces = self.kind == CutKind::Swarf && self.faces().is_empty();
+        self
+    }
+
+    /// The faces a swarf cut follows, by number.
+    pub fn faces(&self) -> Vec<usize> {
+        self.hidden
+            .get("faces")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_u64).filter_map(|f| usize::try_from(f).ok()).collect())
+            .unwrap_or_default()
+    }
+
+    /// The model a swarf cut's faces are on, its faces, and whether more are being picked.
+    pub fn face_pick(&self) -> Option<(String, Vec<usize>, bool)> {
+        if self.kind != CutKind::Swarf {
+            return None;
+        }
+        let model = self.hidden.get("model").and_then(Value::as_str)?.to_owned();
+        Some((model, self.faces(), self.picking_faces))
+    }
+
+    /// Faces were clicked (the clicked one first): in if it was out, all out if it was in.
+    pub fn toggle_faces(&mut self, clicked: &[usize]) {
+        let mut faces = self.faces();
+        let Some(first) = clicked.first() else { return };
+        if faces.contains(first) {
+            faces.retain(|f| !clicked.contains(f));
+        } else {
+            faces.extend(clicked.iter().filter(|f| !faces.contains(f)).copied().collect::<Vec<_>>());
+        }
+        self.hidden.insert("faces".into(), json!(faces));
     }
 
     pub fn fail(&mut self, message: String) {
@@ -389,6 +444,9 @@ impl CutPanel {
                             if *name == "Rotations" {
                                 self.rotations_summary(ui, tokens);
                             }
+                            if *name == "Faces" {
+                                self.face_buttons(ui, tokens);
+                            }
                             if *name == "Path" && self.fields.iter().any(|(p, _)| p.name == "start_x") {
                                 self.start_buttons(ui, tokens);
                             }
@@ -410,6 +468,8 @@ impl CutPanel {
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) && !ui.ctx().egui_wants_keyboard_input() {
             if self.picking_start {
                 self.picking_start = false;
+            } else if self.picking_faces {
+                self.picking_faces = false;
             } else {
                 keep = false;
             }
@@ -480,6 +540,37 @@ impl CutPanel {
         ui.add_space(4.0);
     }
 
+    /// Pick the faces in the viewport, and how many there are.
+    fn face_buttons(&mut self, ui: &mut Ui, tokens: &Tokens) {
+        let count = self.faces().len();
+        ui.label(
+            RichText::new(match count {
+                0 => "No faces selected".to_owned(),
+                1 => "1 face selected".to_owned(),
+                n => format!("{n} faces selected"),
+            })
+            .color(tokens.accent),
+        );
+        ui.horizontal(|ui| {
+            let on = self.picking_faces;
+            let text = if on { "Done selecting" } else { "Select faces" };
+            let button = egui::Button::new(RichText::new(text).color(if on { tokens.on_accent } else { tokens.text }))
+                .fill(if on { tokens.accent } else { tokens.raised_bg });
+            if ui
+                .add(button)
+                .on_hover_text("Click faces of the model to add them, click again to take them away; Esc stops")
+                .clicked()
+            {
+                self.picking_faces = !on;
+            }
+            if ui.add_enabled(count > 0, egui::Button::new("Clear")).on_hover_text("Take all the faces away").clicked()
+            {
+                self.hidden.insert("faces".into(), json!([]));
+            }
+        });
+        ui.add_space(4.0);
+    }
+
     fn text_of(&self, name: &str) -> Option<&String> {
         self.fields.iter().find(|(p, _)| p.name == name).and_then(|(_, f)| match f {
             Field::Text(t) => Some(t),
@@ -545,7 +636,11 @@ impl CutPanel {
                             ui.label(RichText::new(k).color(tokens.text_muted));
                             ui.label(RichText::new(v).strong());
                         };
-                        stat(ui, "Profiles", b.keeps.len().to_string());
+                        stat(
+                            ui,
+                            if self.kind == CutKind::Swarf { "Passes" } else { "Profiles" },
+                            b.keeps.len().to_string(),
+                        );
                         stat(ui, "Time", fmt_time(secs));
                         ui.end_row();
                         stat(ui, "Cutting", units.fmt_len(cut));

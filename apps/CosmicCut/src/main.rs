@@ -24,7 +24,7 @@ const USAGE: &str =
     "usage: CosmicCut [job.ccut] [--empty] [--run \"<command> [json]\"]... [--tab <name>] [--screenshot <file.png>]
 
   job.ccut              open this job file
-  --empty               start with an empty job instead of the sample
+  --empty               start with an empty job instead of the start page
   --run <line>          run a command after start-up, e.g. --run 'view.theme.set {\"theme\":\"light\"}'
   --tab <name>          open on this ribbon tab (Home, Shapes, Cuts, Simulate, Machine)
   --screenshot <file>   save a PNG of the window once the steps have run, then quit";
@@ -66,13 +66,15 @@ fn main() -> ExitCode {
             other => return usage_error(&format!("unknown argument: {other}")),
         }
     }
-    // Until there is a job, the sample shows what the program does.
-    let session = if empty || opened { Session::new() } else { Session::with_sample() };
+    // Started plainly, CosmicCut opens on its start page with an empty job behind it; a script
+    // with no job of its own runs on the sample.
+    let home = !empty && !opened && steps.is_empty();
+    let session = if empty || opened || home { Session::new() } else { Session::with_sample() };
     // A screenshot run is a test: it must not change the operator's saved settings.
     let ephemeral = screenshot.is_some();
     let mut automation = Automation::new(steps, screenshot);
     automation.ribbon_tab = tab;
-    match CosmicCut_ui_egui::run(session, LaunchOptions { automation, ephemeral }) {
+    match CosmicCut_ui_egui::run(session, LaunchOptions { automation, ephemeral, home }) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("CosmicCut could not start: {e}");
@@ -87,7 +89,7 @@ fn usage_error(message: &str) -> ExitCode {
     ExitCode::from(2)
 }
 
-/// In a browser: the sample job on the page's canvas, saving settings in local storage.
+/// In a browser: the start page on the page's canvas, saving settings in local storage.
 #[cfg(target_arch = "wasm32")]
 fn main() {
     use wasm_bindgen::JsCast as _;
@@ -102,8 +104,9 @@ fn main() {
         return;
     };
     wasm_bindgen_futures::spawn_local(async move {
-        let session = CosmicCut_ui_egui::Session::with_sample();
-        let started = CosmicCut_ui_egui::run_web(canvas, session, CosmicCut_ui_egui::LaunchOptions::default()).await;
+        let session = CosmicCut_ui_egui::Session::new();
+        let options = CosmicCut_ui_egui::LaunchOptions { home: true, ..Default::default() };
+        let started = CosmicCut_ui_egui::run_web(canvas, session, options).await;
         // Swap the loading text for the app, or say why it could not start.
         let status = document.as_ref().and_then(|d| d.get_element_by_id("status"));
         match (started, status) {
