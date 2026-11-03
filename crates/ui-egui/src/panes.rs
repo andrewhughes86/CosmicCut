@@ -194,8 +194,10 @@ fn context_menu(
             item(ui, "Lay flat…", one("model.lay_flat", json!({ "id": id })));
             item(ui, "Scale…", one("ui.form", json!({ "command": "model.scale", "id": id })));
             item(ui, "Turn and lift…", one("ui.form", json!({ "command": "model.place", "id": id })));
+            item(ui, "Move…", one("model.move", json!({ "id": id })));
+            item(ui, "Duplicate", one("model.duplicate", json!({ "id": id })));
             ui.separator();
-            item(ui, "Cut from model…", one("ui.cut.new", json!({ "kind": "model", "model": id })));
+            item(ui, "Cut from model…", one("ui.cut.new", json!({ "kind": "model", "models": [id] })));
             ui.separator();
             item(ui, "Fit stock to model", one("stock.fit", json!({ "model": id })));
             item(ui, "Delete", one("ui.delete", json!({ "command": "model.remove", "id": id, "label": node.label })));

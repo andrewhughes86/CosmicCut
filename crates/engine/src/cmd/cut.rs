@@ -14,6 +14,12 @@ const SCALE: ParamKind = ParamKind::Number { min: 1.0e-6, max: 1.0e6 };
 
 const ID: Param = Param::optional("id", ParamKind::Str, "Change this cut's settings instead of adding a cut");
 const NAME: Param = Param::optional("name", ParamKind::Str, "Name for the cut");
+const IGNORE: Param = Param::optional(
+    "ignore",
+    ParamKind::StrList { max: 64 },
+    "Models off the table by the time this cut runs: the wire may pass through them (the cut's operation can say \
+     so for all its cuts instead)",
+);
 const KERF: Param = Param::optional("kerf", ParamKind::Length { min: 0.0, max: 50.0 }, "Kerf (default: the machine's)");
 const COMPENSATE: Param = Param::optional(
     "compensate",
@@ -77,6 +83,12 @@ pub const PROFILE_PARAMS: &[Param] = &[
     ID,
     NAME,
     Param::required("shape", ParamKind::Str, "The outline the wire follows, seen along the wire"),
+    Param::optional(
+        "skip",
+        ParamKind::IntList { max: 10_000 },
+        "Lines of the sketch this cut leaves out (their ids); what is left is cut as it is, from the end nearest the \
+         start point",
+    ),
     Param::optional("angle", DEG, "Turntable angle (B) of the first pass, degrees (default 0)"),
     Param::optional(
         "copies",
@@ -109,6 +121,7 @@ pub const PROFILE_PARAMS: &[Param] = &[
     BOTTOM,
     ATTACH,
     RELEASE,
+    IGNORE,
     KERF,
     COMPENSATE,
     FEED,
@@ -139,6 +152,7 @@ pub const TWOVIEW_PARAMS: &[Param] = &[
     BOTTOM,
     ATTACH,
     RELEASE,
+    IGNORE,
     KERF,
     COMPENSATE,
     FEED,
@@ -160,6 +174,7 @@ pub const LATHE_PARAMS: &[Param] = &[
     Param::optional("angle", DEG, "Turntable angle of the first pass"),
     Param::optional("sweep", ParamKind::Number { min: 1.0, max: 360.0 }, "Degrees the passes span (default 360)"),
     RELEASE,
+    IGNORE,
     KERF,
     COMPENSATE,
     FEED,
@@ -169,7 +184,12 @@ pub const LATHE_PARAMS: &[Param] = &[
 pub const MODEL_PARAMS: &[Param] = &[
     ID,
     NAME,
-    Param::optional("model", ParamKind::Str, "The model (default the imported one)"),
+    Param::optional(
+        "models",
+        ParamKind::StrList { max: 64 },
+        "The models to cut, together: at each angle the wire follows the outline of them all (default every model)",
+    ),
+    Param::optional("model", ParamKind::Str, "One model to cut (older jobs; `models` takes several)"),
     Param::optional(
         "spacing",
         ParamKind::Choice(crate::cut::SPACINGS),
@@ -188,6 +208,7 @@ pub const MODEL_PARAMS: &[Param] = &[
     ),
     ALTERNATE,
     RELEASE,
+    IGNORE,
     KERF,
     FEED,
 ];
@@ -212,6 +233,7 @@ pub const SWARF_PARAMS: &[Param] = &[
         ParamKind::Length { min: 0.001, max: 50.0 },
         "How far the faces' level slices may be off a straight line (default 0.25 mm)",
     ),
+    IGNORE,
     KERF,
     COMPENSATE,
     FEED,
@@ -227,6 +249,7 @@ pub const SLAB_PARAMS: &[Param] = &[
     Param::optional("angle", DEG, "Turntable angle, degrees"),
     Param::optional("order", ParamKind::Choice(&["top_down", "bottom_up"]), "Cut from the top down or the bottom up"),
     Param::optional("alternate", ParamKind::Bool, "Cut back and forth (default) instead of always left to right"),
+    IGNORE,
     KERF,
     FEED,
     CLEARANCE,
@@ -319,7 +342,7 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         tooltip: "Copy the selected cut",
         placement: Some(Placement::small(RibbonTab::Cuts, "Edit")),
         icon: None,
-        shortcut: Some("Ctrl+D"),
+        shortcut: None,
         params: &[Param::optional("id", ParamKind::Str, "The cut (default the selected one)")],
         returns: "cut",
         enabled: super::has_cuts,
@@ -520,7 +543,11 @@ fn shift(s: &mut Session, p: &Value, by: isize) -> EngineResult<Value> {
 pub(crate) fn create(s: &mut Session, kind: CutKind, p: &Value) -> EngineResult<Value> {
     let stored = stored_params(p);
     let built = {
-        let cx = s.job.context();
+        let op = match params::opt_str(p, "id")? {
+            Some(id) => s.job.cut(id).map_or(s.job.active_op.as_str(), |c| c.op.as_str()),
+            None => s.job.active_op.as_str(),
+        };
+        let cx = s.job.context_for(op);
         crate::cut::build(&cx, kind, &stored)?
     };
     let editing = params::opt_str(p, "id")?.map(str::to_owned);

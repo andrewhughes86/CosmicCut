@@ -71,6 +71,28 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         },
     },
     CommandSpec {
+        id: "edit.duplicate",
+        label: "Duplicate",
+        tooltip: "Copy the selected cut (after it) or model (beside it)",
+        placement: None,
+        icon: None,
+        shortcut: Some("Ctrl+D"),
+        params: &[],
+        returns: "the copy",
+        enabled: always,
+        run: |s, _| {
+            let id = if s.selected_cut().is_some() {
+                "cut.duplicate"
+            } else if s.selected_model().is_some() {
+                "model.duplicate"
+            } else {
+                return Err(EngineError::InvalidParams("select a cut or a model first".into()));
+            };
+            let spec = super::find(id).ok_or_else(|| EngineError::UnknownCommand(id.into()))?;
+            (spec.run)(s, &Value::Null)
+        },
+    },
+    CommandSpec {
         id: "edit.copy",
         label: "Copy",
         tooltip: "Keep the selected cut, shape or model for Paste",
@@ -116,14 +138,8 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
                     s.job.shapes.push(sh);
                     id
                 }
-                Clip::Model(m) => {
-                    let mut m = *m;
-                    m.id = s.job.fresh_id("model");
-                    m.name = s.job.fresh_name(&m.name);
-                    let id = m.id.clone();
-                    s.job.models.push(m);
-                    id
-                }
+                // A pasted model stands beside where it was copied from, not on top of it.
+                Clip::Model(m) => super::model::add_beside(s, *m),
             };
             s.view.selection = Some(id.clone());
             s.job.touch();

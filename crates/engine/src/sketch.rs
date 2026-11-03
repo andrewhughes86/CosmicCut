@@ -1468,10 +1468,15 @@ impl Sketch {
     /// The outlines the sketch draws: curves joined end to end into loops (closed) and chains
     /// (open); circles are loops of their own. Construction geometry is left out.
     pub fn paths(&self) -> Vec<Path2> {
+        self.paths_without(&[])
+    }
+
+    /// The outlines with the curves `skip` names left out (a cut that leaves some lines alone).
+    pub fn paths_without(&self, skip: &[u32]) -> Vec<Path2> {
         let mut out = Vec::new();
         // Each joining curve as (from, to, points along it, excluding `from`).
         let mut edges: Vec<(u32, u32, Vec<DVec2>)> = Vec::new();
-        for e in self.entities.iter().filter(|e| !e.construction) {
+        for e in self.entities.iter().filter(|e| !e.construction && !skip.contains(&e.id)) {
             match e.geom {
                 Geom::Line { a, b } => {
                     if let Some(pb) = self.point(b) {
@@ -1544,6 +1549,27 @@ impl Sketch {
             }
         }
         out
+    }
+
+    /// Each curve of the outline (not construction) by id, as points along it.
+    pub fn curves(&self) -> Vec<(u32, Vec<DVec2>)> {
+        self.entities
+            .iter()
+            .filter(|e| !e.construction)
+            .filter_map(|e| {
+                let pts = match e.geom {
+                    Geom::Line { a, b } => vec![self.point(a)?, self.point(b)?],
+                    Geom::Arc { c, a, b } => arc_points(self.point(c)?, self.point(a)?, self.point(b)?),
+                    Geom::Circle { c, r } => {
+                        let pc = self.point(c)?;
+                        let n = segments(r, TAU);
+                        (0..=n).map(|k| pc + DVec2::from_angle(TAU * k as f64 / n as f64) * r).collect()
+                    }
+                    Geom::Point { .. } => return None,
+                };
+                Some((e.id, pts))
+            })
+            .collect()
     }
 
     /// A sketch on `plane` drawing `paths` as lines end to end (each closed one a loop), so

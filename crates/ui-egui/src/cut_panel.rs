@@ -30,7 +30,7 @@ impl Widths {
 }
 
 /// Parameters the panel carries without showing.
-const HIDDEN: &[&str] = &["id", "name", "model", "faces"];
+const HIDDEN: &[&str] = &["id", "name", "model", "models", "faces", "ignore", "skip"];
 
 /// The card a parameter shows in.
 fn section(name: &str) -> &'static str {
@@ -171,6 +171,8 @@ pub struct CutPanel {
     pub picking_start: bool,
     /// Faces of the model are being clicked to add or take away.
     pub picking_faces: bool,
+    /// Lines of a profile's sketch are being clicked to leave out or put back.
+    pub picking_lines: bool,
 }
 
 impl CutPanel {
@@ -205,10 +207,9 @@ impl CutPanel {
                 CutKind::Model => {
                     values.insert("divisions".into(), json!(8));
                     values.insert("degrees".into(), json!(22.5));
-                    let model = session.selected_model().or(session.job.models.first()).map(|m| m.id.clone());
-                    if let Some(m) = model {
-                        values.insert("model".into(), json!(m));
-                    }
+                    // Every model, cut together: the wire cannot pass one to cut another.
+                    let all: Vec<&str> = session.job.models.iter().map(|m| m.id.as_str()).collect();
+                    values.insert("models".into(), json!(all));
                 }
                 _ => {}
             }
@@ -287,6 +288,7 @@ impl CutPanel {
             error: None,
             picking_start: false,
             picking_faces: false,
+            picking_lines: false,
         }
         .picking_faces_if_none()
     }
@@ -442,10 +444,17 @@ impl CutPanel {
                             ui.label(RichText::new(*name).strong().size(15.0).color(tokens.text));
                             ui.label(RichText::new(intro(name, self.kind)).color(tokens.text_muted));
                             if *name == "Rotations" {
+                                self.model_boxes(ui, session, tokens);
                                 self.rotations_summary(ui, tokens);
                             }
                             if *name == "Faces" {
                                 self.face_buttons(ui, tokens);
+                            }
+                            if *name == "Shape" && self.kind == CutKind::Profile {
+                                self.line_buttons(ui, session, tokens);
+                            }
+                            if *name == "Wire" {
+                                self.ignore_boxes(ui, session, tokens);
                             }
                             if *name == "Path" && self.fields.iter().any(|(p, _)| p.name == "start_x") {
                                 self.start_buttons(ui, tokens);
@@ -470,6 +479,8 @@ impl CutPanel {
                 self.picking_start = false;
             } else if self.picking_faces {
                 self.picking_faces = false;
+            } else if self.picking_lines {
+                self.picking_lines = false;
             } else {
                 keep = false;
             }
@@ -537,6 +548,189 @@ impl CutPanel {
                 self.set_text("start_y", String::new());
             }
         });
+        ui.add_space(4.0);
+    }
+
+    /// For cuts from models, when there is more than one: which are cut together.
+    fn model_boxes(&mut self, ui: &mut Ui, session: &Session, tokens: &Tokens) {
+        if self.kind != CutKind::Model || session.job.models.len() < 2 {
+            return;
+        }
+        // An older cut names one model; else the list, else every model.
+        let mut chosen: Vec<String> = match (self.hidden.get("models"), self.hidden.get("model")) {
+            (Some(Value::Array(a)), _) => a.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
+            (_, Some(Value::String(m))) => vec![m.clone()],
+            _ => session.job.models.iter().map(|m| m.id.clone()).collect(),
+        };
+        ui.add_space(4.0);
+        ui.label(RichText::new("Models cut together").strong());
+        let mut changed = false;
+        for m in &session.job.models {
+            let mut on = chosen.contains(&m.id);
+            // The last one stays: a cut needs a model.
+            let last = on && chosen.len() == 1;
+            if ui.add_enabled(!last, egui::Checkbox::new(&mut on, m.name.as_str())).changed() {
+                if on {
+                    chosen.push(m.id.clone());
+                } else {
+                    chosen.retain(|c| *c != m.id);
+                }
+                changed = true;
+            }
+        }
+        ui.label(
+            RichText::new("The wire runs right across the foam, so a model left out must stand clear of it.")
+                .color(tokens.text_muted),
+        );
+        if changed {
+            self.hidden.remove("model");
+            self.hidden.insert("models".into(), json!(chosen));
+        }
+    }
+
+    /// The models this cut does not make that will be off the table when it runs: the wire may
+    /// pass through them.
+    fn ignore_boxes(&mut self, ui: &mut Ui, session: &Session, tokens: &Tokens) {
+        let own: Vec<String> = match self.kind {
+            CutKind::Model => match (self.hidden.get("models"), self.hidden.get("model")) {
+                (Some(Value::Array(a)), _) => a.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
+                (_, Some(Value::String(m))) => vec![m.clone()],
+                _ => session.job.models.iter().map(|m| m.id.clone()).collect(),
+            },
+            CutKind::Swarf => self.hidden.get("model").and_then(Value::as_str).map(str::to_owned).into_iter().collect(),
+            _ => Vec::new(),
+        };
+        let others: Vec<_> = session.job.models.iter().filter(|m| !own.contains(&m.id)).collect();
+        if others.is_empty() {
+            return;
+        }
+        let mut ignored: Vec<String> = self
+            .hidden
+            .get("ignore")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+            .unwrap_or_default();
+        // What the cut's operation already says is off the table.
+        let op = self
+            .editing
+            .as_deref()
+            .and_then(|id| session.job.cut(id))
+            .map_or(session.job.active_op.as_str(), |c| c.op.as_str());
+        let by_op: Vec<String> =
+            session.job.ops.iter().find(|o| o.id == op).map(|o| o.ignore.clone()).unwrap_or_default();
+        ui.add_space(4.0);
+        ui.label(RichText::new("Models already off the table").strong());
+        let mut changed = false;
+        for m in others {
+            if by_op.contains(&m.id) {
+                let mut on = true;
+                ui.add_enabled(false, egui::Checkbox::new(&mut on, format!("{} (its operation says so)", m.name)));
+                continue;
+            }
+            let mut on = ignored.contains(&m.id);
+            if ui.checkbox(&mut on, m.name.as_str()).changed() {
+                if on {
+                    ignored.push(m.id.clone());
+                } else {
+                    ignored.retain(|i| *i != m.id);
+                }
+                changed = true;
+            }
+        }
+        ui.label(
+            RichText::new(
+                "The wire may pass through these: they were cut and taken off before this cut runs. The cut fails if \
+                 the wire would cut any other model. Operation settings can say this for all of an operation's cuts.",
+            )
+            .color(tokens.text_muted),
+        );
+        ui.add_space(6.0);
+        if changed {
+            if ignored.is_empty() {
+                self.hidden.remove("ignore");
+            } else {
+                self.hidden.insert("ignore".into(), json!(ignored));
+            }
+        }
+    }
+
+    /// The lines a profile leaves out, by sketch curve id.
+    fn skipped(&self) -> Vec<u32> {
+        self.hidden
+            .get("skip")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_u64).filter_map(|v| u32::try_from(v).ok()).collect())
+            .unwrap_or_default()
+    }
+
+    /// A line was clicked: left out if it was in, back in if it was out.
+    pub fn toggle_line(&mut self, id: u32) {
+        let mut skip = self.skipped();
+        match skip.iter().position(|s| *s == id) {
+            Some(i) => {
+                skip.remove(i);
+            }
+            None => skip.push(id),
+        }
+        if skip.is_empty() {
+            self.hidden.remove("skip");
+        } else {
+            self.hidden.insert("skip".into(), json!(skip));
+        }
+    }
+
+    /// For a profile: the table angle, its shape's lines where the wire meets them (each with
+    /// whether it is left out), and whether lines are being picked.
+    pub fn line_pick(&self, session: &Session) -> Option<crate::viewport::LinePick> {
+        if self.kind != CutKind::Profile || !self.picking_lines {
+            return None;
+        }
+        let p = self.params(session).ok()?;
+        let (b, lines) = CosmicCut_engine::cut::profile_lines(&session.job.context(), &p).ok()?;
+        let skip = self.skipped();
+        Some((b, lines.into_iter().map(|(id, pts)| (id, pts, skip.contains(&id))).collect(), self.picking_lines))
+    }
+
+    /// Leave out lines of the sketch (clicked in the viewport), and how many are out.
+    fn line_buttons(&mut self, ui: &mut Ui, session: &Session, tokens: &Tokens) {
+        let is_sketch = self
+            .params(session)
+            .ok()
+            .and_then(|p| p.get("shape").and_then(Value::as_str).map(str::to_owned))
+            .and_then(|id| session.job.shape(&id).map(|s| s.sketch.is_some()))
+            .unwrap_or(false);
+        if !is_sketch {
+            return;
+        }
+        let out = self.skipped().len();
+        ui.horizontal(|ui| {
+            let on = self.picking_lines;
+            let text = if on { "Done" } else { "Leave out lines" };
+            let button = egui::Button::new(RichText::new(text).color(if on { tokens.on_accent } else { tokens.text }))
+                .fill(if on { tokens.accent } else { tokens.raised_bg });
+            if ui
+                .add(button)
+                .on_hover_text(
+                    "Click lines of the shape in the viewport to leave them out of this cut, or put them back",
+                )
+                .clicked()
+            {
+                self.picking_lines = !on;
+                self.picking_start = false;
+            }
+            if ui.add_enabled(out > 0, egui::Button::new("Put all back")).clicked() {
+                self.hidden.remove("skip");
+            }
+        });
+        if out > 0 {
+            ui.label(
+                RichText::new(format!(
+                    "{out} line{} left out. What is left is cut as it is, from the end nearest the start point (Path).",
+                    if out == 1 { "" } else { "s" }
+                ))
+                .color(tokens.accent),
+            );
+        }
         ui.add_space(4.0);
     }
 

@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.3.0
+
+- **Several models in one cut.** A From model cut takes any of the job's models (all of them by
+  default) and follows the outline of them all together at each angle.
+- **The wire keeps out of other models.** Every cut is checked against the models it is not
+  making. Because the wire runs right across the foam, a cut fails with an error naming the
+  model, the table angle and the height if the wire or its kerf would pass through one.
+- **Move tool** (Home → Move): arrows slide the model along X, Y and Z, and rings turn it about
+  them. After a drag the value shows in a box, selected, to type over or accept with Enter. Each
+  model keeps its position and turns (now about X and Y as well as Z), and saves them with the
+  job.
+- **Click a model in the viewport** to select it (the selected one is tinted). **Ctrl+D**
+  duplicates the selected cut or model, and Ctrl+C then Ctrl+V copies a model. A copied model
+  stands beside the original, not on top of it.
+- **Models already off the table.** An operation's settings, or a cut's, can list models that
+  were cut and taken off before it runs. The wire may pass through those, and either list is
+  enough. For example, cut the parts at the ends of a block in Op 1, take them off, then cut the
+  centre parts in Op 2 with the end parts listed.
+- **Profile cuts can leave lines out.** In the Cut tab, **Leave out lines**, then click lines
+  of the sketch in the viewport (left-out lines show dashed; click one again to put it back).
+  - What is left is cut as it is, from the end nearest the start point (**Pick the start
+    point**).
+  - Where an end is inside the foam, the wire comes in level from the nearest side that does
+    not cross the outline, or down from the top, and leaves the same way.
+  - For example, leave out a part's bottom line and start at its outer corner: the wire goes
+    round the part and parts it off along the bottom back out to the outside.
+  - The simulation keeps the side of the outline that holds the part.
+- Swarf faces that are picked stay highlighted in their own colour until the Cut tab closes.
+  Highlighted faces now show through the stock.
+
 ## 0.2.0
 
 - **Swarf cuts.** Click faces of a model and the wire lies along them at every height, with X,

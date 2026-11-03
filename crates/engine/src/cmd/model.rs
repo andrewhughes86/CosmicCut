@@ -76,6 +76,8 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
             let floor = s.job.stock.bottom();
             let m = s.job.models.get_mut(i).ok_or_else(missing)?;
             m.down = down.normalize();
+            m.tilt_x = 0.0;
+            m.tilt_y = 0.0;
             m.centred = true;
             m.place(floor);
             changed(s, i)
@@ -118,6 +120,8 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
             if params::opt_bool(p, "reset")?.unwrap_or(false) {
                 m.down = DVec3::NEG_Z;
                 m.rotate = 0.0;
+                m.tilt_x = 0.0;
+                m.tilt_y = 0.0;
                 m.scale = 1.0;
                 m.lift = 0.0;
                 m.centred = true;
@@ -138,6 +142,71 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
                 m.at = glam::DVec2::new(x.unwrap_or(m.at.x), y.unwrap_or(m.at.y));
             }
             m.place(floor);
+            changed(s, i)
+        },
+    },
+    CommandSpec {
+        id: "model.move",
+        label: "Move",
+        tooltip: "Move and turn the model: drag the arrows to slide it along X, Y or Z, the rings to turn it about \
+                  them, then type the exact value",
+        placement: None,
+        icon: Some("model_move"),
+        shortcut: None,
+        params: &[
+            Param::optional("id", ParamKind::Str, "The model (default the selected one)"),
+            Param::optional("x", ParamKind::Length { min: -1.0e5, max: 1.0e5 }, "Its middle across the table (X)"),
+            Param::optional("y", ParamKind::Length { min: -1.0e5, max: 1.0e5 }, "Its middle along the wire (Y)"),
+            Param::optional("z", ParamKind::Length { min: -1.0e5, max: 1.0e5 }, "Its bottom above the stock's (Z)"),
+            Param::optional("rx", ParamKind::Number { min: -3600.0, max: 3600.0 }, "Turn about X, degrees"),
+            Param::optional("ry", ParamKind::Number { min: -3600.0, max: 3600.0 }, "Turn about Y, degrees"),
+            Param::optional("rz", ParamKind::Number { min: -3600.0, max: 3600.0 }, "Turn about Z, degrees"),
+        ],
+        returns: "model",
+        enabled: has_models,
+        run: |s, p| {
+            let i = index(s, p)?;
+            let floor = s.job.stock.bottom();
+            let m = s.job.models.get_mut(i).ok_or_else(missing)?;
+            let turn = |k: &str| params::opt_f64(p, k, -3600.0, 3600.0);
+            if let Some(v) = turn("rx")? {
+                m.tilt_x = v;
+            }
+            if let Some(v) = turn("ry")? {
+                m.tilt_y = v;
+            }
+            if let Some(v) = turn("rz")? {
+                m.rotate = v;
+            }
+            if let Some(v) = params::opt_f64(p, "z", -1.0e5, 1.0e5)? {
+                m.lift = v;
+            }
+            // Turning moves its middle; where it was asked to stand (or the axis) holds.
+            let x = params::opt_f64(p, "x", -1.0e5, 1.0e5)?;
+            let y = params::opt_f64(p, "y", -1.0e5, 1.0e5)?;
+            if x.is_some() || y.is_some() {
+                m.centred = false;
+                m.at = DVec2::new(x.unwrap_or(m.at.x), y.unwrap_or(m.at.y));
+            }
+            m.place(floor);
+            changed(s, i)
+        },
+    },
+    CommandSpec {
+        id: "model.duplicate",
+        label: "Duplicate model",
+        tooltip: "Copy the selected model, beside it on the table",
+        placement: None,
+        icon: None,
+        shortcut: None,
+        params: &[Param::optional("id", ParamKind::Str, "The model (default the selected one)")],
+        returns: "model",
+        enabled: has_models,
+        run: |s, p| {
+            let i = index(s, p)?;
+            let m = s.job.models.get(i).cloned().ok_or_else(missing)?;
+            let id = add_beside(s, m);
+            let i = s.job.models.iter().position(|m| m.id == id).ok_or_else(missing)?;
             changed(s, i)
         },
     },
@@ -345,6 +414,24 @@ fn fit_ratio(mesh: &CosmicCut_geom::Mesh, stock: &crate::stock::Stock, floor: f6
         }
     }
     Ok(lo)
+}
+
+/// Adds a copy of `m` standing beside the original (to its right, an inch clear), selected.
+/// Returns its id.
+pub(crate) fn add_beside(s: &mut Session, mut m: Model) -> String {
+    let floor = s.job.stock.bottom();
+    let at = m.position(floor);
+    let width = f64::from(m.bounds().size().x);
+    m.id = s.job.fresh_id("model");
+    m.name = s.job.fresh_name(&m.name);
+    m.centred = false;
+    m.at = DVec2::new(at.x + width + 25.4, at.y);
+    m.place(floor);
+    let id = m.id.clone();
+    s.job.models.push(m);
+    s.job.rebuild();
+    s.view.selection = Some(id.clone());
+    id
 }
 
 fn has_models(s: &Session) -> bool {

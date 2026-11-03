@@ -192,12 +192,13 @@ impl ViewportGpu {
         let face_bias = wgpu::DepthBiasState { constant: 2, slope_scale: 1.5, clamp: 0.0 };
         let triangles =
             scene_pipeline("viewport triangles", wgpu::PrimitiveTopology::TriangleList, depth(true, face_bias));
-        // Picked and hovered faces are redrawn over the part; without the face bias they win
-        // the depth test against the biased part triangles beneath them.
+        // Picked and hovered faces are drawn first, writing depth: without the face bias they win
+        // the depth test against the biased part triangles drawn over them, and the see-through
+        // stock drawn after blends over them as it does over the part.
         let highlight = scene_pipeline(
             "viewport highlight",
             wgpu::PrimitiveTopology::TriangleList,
-            depth(false, wgpu::DepthBiasState::default()),
+            depth(true, wgpu::DepthBiasState::default()),
         );
         let lines = scene_pipeline(
             "viewport lines",
@@ -394,10 +395,10 @@ impl ViewportGpu {
                     rp.draw(0..*n, 0..1);
                 }
             };
+            draw(&self.highlight, lit);
             for mesh in meshes {
                 draw(&self.triangles, &mesh.triangles);
             }
-            draw(&self.highlight, lit);
             for mesh in meshes {
                 draw(&self.lines, &mesh.lines);
             }

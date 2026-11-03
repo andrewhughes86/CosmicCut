@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "CosmicCut"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "CosmicCut-ui-egui",
  "eframe",
@@ -18,7 +18,7 @@ dependencies = [
 
 [[package]]
 name = "CosmicCut-engine"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "CosmicCut-geom",
  "CosmicCut-io",
@@ -30,7 +30,7 @@ dependencies = [
 
 [[package]]
 name = "CosmicCut-geom"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "glam",
  "i_overlay",
@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "CosmicCut-io"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "CosmicCut-geom",
  "miniz_oxide 0.8.9",
@@ -50,7 +50,7 @@ dependencies = [
 
 [[package]]
 name = "CosmicCut-render"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "CosmicCut-geom",
  "bytemuck",
@@ -58,7 +58,7 @@ dependencies = [
 
 [[package]]
 name = "CosmicCut-ui-egui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "CosmicCut-engine",
  "CosmicCut-geom",

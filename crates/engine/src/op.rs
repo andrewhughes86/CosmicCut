@@ -65,6 +65,9 @@ pub struct Operation {
     pub message: String,
     /// For the operator: written into the program as comments.
     pub notes: String,
+    /// Models taken off the table before this operation starts: its cuts' wire may pass through
+    /// them.
+    pub ignore: Vec<String>,
 }
 
 /// The id of the operation every job starts with.
@@ -96,6 +99,7 @@ impl Operation {
             "stop": self.stop.id(),
             "message": self.message,
             "notes": self.notes,
+            "ignore": self.ignore,
         })
     }
 
@@ -118,6 +122,12 @@ impl Operation {
         if let Some(n) = text("notes")? {
             self.notes = n;
         }
+        if let Some(list) = p.get("ignore").filter(|v| !v.is_null()) {
+            let list = list
+                .as_array()
+                .ok_or_else(|| EngineError::InvalidParams("`ignore` must be a list of model ids".into()))?;
+            self.ignore = list.iter().filter_map(Value::as_str).take(64).map(str::to_owned).collect();
+        }
         Ok(())
     }
 
@@ -138,6 +148,9 @@ impl Operation {
         }
         if !self.notes.is_empty() {
             out.push(("Notes".into(), self.notes.clone()));
+        }
+        if !self.ignore.is_empty() {
+            out.push(("Models off the table".into(), self.ignore.join(", ")));
         }
         out
     }

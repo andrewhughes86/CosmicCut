@@ -305,6 +305,27 @@ impl CosmicApp {
             self.status = None;
             return;
         }
+        // Move without values puts the handles on the model in the viewport.
+        if id == "model.move" && params.as_object().is_none_or(|p| p.keys().all(|k| k == "id")) {
+            let model = params
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| self.session.selected_model().map(|m| m.id.clone()))
+                .or_else(|| {
+                    self.session.job.models.first().filter(|_| self.session.job.models.len() == 1).map(|m| m.id.clone())
+                });
+            match model {
+                Some(m) => {
+                    self.session.sim = None;
+                    self.viewport.lay_flat = None;
+                    self.viewport.moving = Some(m);
+                    self.status = None;
+                }
+                None => self.status = Some("select a model to move".into()),
+            }
+            return;
+        }
         // Lay flat without a face picks one in the viewport.
         if id == "model.lay_flat" && params.as_object().is_none_or(|p| p.keys().all(|k| k == "id")) {
             let model = params
@@ -798,6 +819,7 @@ impl eframe::App for CosmicApp {
         }
         self.viewport.pick_start = picking;
         self.viewport.face_pick = self.cut_panel.as_ref().and_then(|p| p.face_pick());
+        self.viewport.line_pick = self.cut_panel.as_ref().and_then(|p| p.line_pick(&self.session));
 
         let mut cut_outcome: Option<(Option<Request>, bool)> = None;
         let mut stock_done = false;
@@ -875,6 +897,16 @@ impl eframe::App for CosmicApp {
             && let Some(panel) = self.cut_panel.as_mut()
         {
             panel.take_start(picked);
+        }
+        if let Some(line) = self.viewport.picked_line.take()
+            && let Some(panel) = self.cut_panel.as_mut()
+        {
+            panel.toggle_line(line);
+        }
+        if std::mem::take(&mut self.viewport.stop_line_pick)
+            && let Some(panel) = self.cut_panel.as_mut()
+        {
+            panel.picking_lines = false;
         }
         let face = self.viewport.picked_face.take();
         let stop = std::mem::take(&mut self.viewport.stop_face_pick);

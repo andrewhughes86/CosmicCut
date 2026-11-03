@@ -18,6 +18,9 @@ pub struct OpDialog {
     stop: Stop,
     message: String,
     notes: String,
+    /// Models off the table before this operation, and every model to choose from (id, name).
+    ignore: Vec<String>,
+    models: Vec<(String, String)>,
 }
 
 impl OpDialog {
@@ -32,6 +35,8 @@ impl OpDialog {
             stop: op.stop,
             message: op.message.clone(),
             notes: op.notes.clone(),
+            ignore: op.ignore.clone(),
+            models: session.job.models.iter().map(|m| (m.id.clone(), m.name.clone())).collect(),
         })
     }
 
@@ -104,6 +109,32 @@ impl OpDialog {
                         .color(tokens.text_muted),
                 );
             });
+            if !self.models.is_empty() {
+                ui.add_space(6.0);
+                Container::new(Surface::Card).show(ui, tokens, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new("Models already off the table").strong());
+                    for (id, name) in &self.models {
+                        let mut on = self.ignore.contains(id);
+                        if ui.checkbox(&mut on, name.as_str()).changed() {
+                            if on {
+                                self.ignore.push(id.clone());
+                            } else {
+                                self.ignore.retain(|i| i != id);
+                            }
+                        }
+                    }
+                    ui.label(
+                        RichText::new(
+                            "Parts cut and taken off before this operation starts: the wire of its cuts may pass \
+                             through where they were. Otherwise a cut fails if the wire would cut a model it is not \
+                             making.",
+                        )
+                        .size(11.5)
+                        .color(tokens.text_muted),
+                    );
+                });
+            }
             ui.add_space(10.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let ok = egui::Button::new(RichText::new("Save").strong().color(tokens.on_accent))
@@ -123,7 +154,7 @@ impl OpDialog {
                     "op.edit".into(),
                     json!({
                         "id": self.id, "name": self.name, "stop": self.stop.id(),
-                        "message": self.message, "notes": self.notes,
+                        "message": self.message, "notes": self.notes, "ignore": self.ignore,
                     }),
                 )),
                 false,

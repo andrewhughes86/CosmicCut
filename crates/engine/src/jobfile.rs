@@ -64,6 +64,8 @@ pub fn from_json(v: &Value) -> EngineResult<JobState> {
             model.down = glam::DVec3::new(x, y, z);
         }
         model.rotate = num("rotate", 0.0);
+        model.tilt_x = num("tilt_x", 0.0);
+        model.tilt_y = num("tilt_y", 0.0);
         model.scale = num("scale", 1.0).clamp(1.0e-6, 1.0e6);
         model.lift = num("lift", 0.0);
         model.visible = m.get("visible").and_then(Value::as_bool).unwrap_or(true);

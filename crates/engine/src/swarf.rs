@@ -381,13 +381,17 @@ fn simultaneous_feed(from: &WirePos, to: &WirePos, feed: f64, half: f64) -> f64 
     if fastest <= along + 1.0e-12 || fastest <= 0.0 { feed } else { (feed * along / fastest).max(1.0) }
 }
 
-pub(crate) fn swarf(cx: &Context<'_>, p: &Value) -> EngineResult<Built> {
-    let c = crate::cut::common(cx, p)?;
-    let model = match params::opt_str(p, "model")? {
+/// The model a swarf cut follows: the one `model` names, else the first.
+pub(crate) fn model_of<'a>(cx: &Context<'a>, p: &Value) -> EngineResult<Option<&'a Model>> {
+    Ok(match params::opt_str(p, "model")? {
         Some(id) => cx.models.iter().find(|m| m.id == id || m.name == id),
         None => cx.models.first(),
-    }
-    .ok_or_else(|| EngineError::InvalidParams("import a model first".into()))?;
+    })
+}
+
+pub(crate) fn swarf(cx: &Context<'_>, p: &Value) -> EngineResult<Built> {
+    let c = crate::cut::common(cx, p)?;
+    let model = model_of(cx, p)?.ok_or_else(|| EngineError::InvalidParams("import a model first".into()))?;
     let faces = faces_param(p, model)?;
     let step = params::opt_f64(p, "height_step", 0.05, 1000.0)?.unwrap_or(2.0);
     let tol = params::opt_f64(p, "tolerance", 0.001, 50.0)?.unwrap_or(DEFAULT_TOLERANCE);
@@ -575,7 +579,7 @@ pub(crate) mod tests {
         // However the sides were split into faces, the faces of each side line up: four passes.
         let faces = sides(&model);
         let models = [model];
-        let cx = Context { machine: &m, stock: &s, shapes: &[], models: &models };
+        let cx = Context { machine: &m, stock: &s, shapes: &[], models: &models, ignore: &[] };
         let p = serde_json::json!({ "faces": faces, "kerf": 1.0, "height_step": 2.0 });
         let built = swarf(&cx, &p)?;
         assert!(built.warnings.is_empty(), "{:?}", built.warnings);
@@ -661,7 +665,7 @@ pub(crate) mod tests {
         let side: Vec<usize> = sides(&model);
         assert!(!side.is_empty());
         let models = [model];
-        let cx = Context { machine: &m, stock: &s, shapes: &[], models: &models };
+        let cx = Context { machine: &m, stock: &s, shapes: &[], models: &models, ignore: &[] };
         // The whole round side as one face can't be followed; its flat facets one by one cut
         // into each other.
         let r = swarf(&cx, &serde_json::json!({ "faces": side }));

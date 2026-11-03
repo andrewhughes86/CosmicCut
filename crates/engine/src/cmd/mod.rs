@@ -451,6 +451,7 @@ pub static EXTRA_PLACEMENTS: &[(&str, Placement)] = &[
     ("model.import", Placement::large(RibbonTab::Home, "Import")),
     ("model.lay_flat", Placement::large(RibbonTab::Home, "Import")),
     ("model.centre", Placement::large(RibbonTab::Home, "Import")),
+    ("model.move", Placement::large(RibbonTab::Home, "Import")),
     ("model.scale", Placement::large(RibbonTab::Home, "Import")),
     ("shape.import", Placement::large(RibbonTab::Home, "Import")),
     ("stock.block", Placement::large(RibbonTab::Home, "Setup")),

@@ -18,6 +18,11 @@ const SETTINGS: &[Param] = &[
     ),
     Param::optional("message", ParamKind::Str, "Shown to the operator on the controller when the operation starts"),
     Param::optional("notes", ParamKind::Str, "For the operator: written into the program as comments"),
+    Param::optional(
+        "ignore",
+        ParamKind::StrList { max: 64 },
+        "Models taken off the table before this operation: its cuts' wire may pass through them",
+    ),
 ];
 
 pub(super) static COMMANDS: &[CommandSpec] = &[
@@ -56,6 +61,7 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
             SETTINGS[1],
             SETTINGS[2],
             SETTINGS[3],
+            SETTINGS[4],
         ],
         returns: "operation",
         enabled: always,
@@ -164,6 +170,8 @@ fn index(s: &Session, p: &Value) -> EngineResult<usize> {
 }
 
 fn changed(s: &mut Session) {
+    // What an operation ignores changes what its cuts may do.
+    s.job.rebuild();
     s.job.touch();
     s.sim = None;
 }

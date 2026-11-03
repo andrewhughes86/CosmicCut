@@ -19,6 +19,7 @@
 pub mod cmd;
 pub mod cut;
 pub mod error;
+pub mod interference;
 pub mod jobfile;
 pub mod library;
 pub mod machine;

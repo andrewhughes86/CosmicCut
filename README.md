@@ -36,7 +36,17 @@ what changed in each is in [CHANGELOG.md](CHANGELOG.md).
 - **Browser:** works in browsers with WebGPU or WebGL 2. Open and Import upload a file into the
   page, and Save and Post G-code download one. Settings are kept in the browser.
 
-Settings, machines and post processors are kept per user and carry over to new versions.
+**Upgrading:** install the new version over the old one. Settings, machines and post processors
+are kept per user, outside the program, so they carry over:
+
+| System | Where they are kept |
+| --- | --- |
+| Linux | `~/.local/share/cosmiccut/app.ron` |
+| Windows | `%APPDATA%\CosmicCut\data\app.ron` |
+| macOS | `~/Library/Application Support/CosmicCut/app.ron` |
+| Browser | the page's local storage |
+
+Uninstalling leaves that file alone. Copy it to keep a backup.
 
 ## What it does
 
@@ -49,10 +59,19 @@ Settings, machines and post processors are kept per user and carry over to new v
   generator.
 - **Cut types.** Profile (single or indexed around the table), Two-view (front and side),
   Lathe (a half profile turned on the table) and Slabs (sheets sliced from the block).
+- **Profiles you can trim.** Leave lines of the sketch out of a profile cut by clicking them,
+  and pick which end the wire starts from. For example, leave out a part's bottom and start at
+  its outer corner, so the part-off runs back out to the outside.
 - **Swarf cuts: X, Y and B moving together.** Click faces of a model and the wire lies along
   them at every height while the table turns, for tapered, twisted and turning faces.
 - **The part stays put.** Cuts leave the part joined to the foam under it while the table turns,
   and a final release cut frees it.
+- **Several models at once.** Click a model to select it, **Ctrl+D** to duplicate it beside
+  itself, and place it with the **Move** tool (drag arrows and rings, then type the exact value).
+  Cut models together, or one operation after another. The wire is checked against every model a
+  cut leaves out, and the cut fails if the wire would pass through one. Models already cut and
+  taken off can be listed in the operation's or the cut's settings, and the wire may pass
+  through those.
 - **Simulation** of the whole program. The table turns with the foam on it, the waste falls
   away, and the wire's X, Y and B are shown as it moves.
 - **G-code you control.** Machine and post processor libraries with HotwireCNC, LinuxCNC,
@@ -82,11 +101,14 @@ To make your own job:
    the dimensions shown in the viewport.
 3. Bring in a part:
    - **Import model**: it stands centred on the turntable. **Bottom face** picks the face it
-     sits on, and **Scale** fits it to the stock.
+     sits on, and **Scale** fits it to the stock. **Move** shows arrows to slide it along X, Y
+     and Z and rings to turn it about them. After a drag, type the exact value or press Enter.
+     The model keeps these values, so they are there next time.
    - **New sketch**: pick a plane, draw, dimension, then **Finish sketch**.
    - **Import sketch**: DXF, SVG, airfoil .dat or XY points.
-4. **Add a cut** from the gallery: **From model** for a model, or Profile, Two-view, Lathe or
-   Slabs for a sketch. It opens in the **Cut** tab with a live preview. **Pick the start
+4. **Add a cut** from the gallery: **From model** for models (several at once: the wire follows
+   their outline together, and any model left out must stand clear of the wire), or Profile,
+   Two-view, Lathe or Slabs for a sketch. It opens in the **Cut** tab with a live preview. **Pick the start
    point** chooses where the wire goes in.
 5. **Simulation** to check it, then **Post G-code** to save the program.
 
@@ -186,8 +208,8 @@ cuts, a DXF arch and an SVG chess-pawn half profile.
 - Pushing a version tag builds the Windows, macOS and Linux packages and publishes a release
   (`.github/workflows/release.yml`; the packaging files are in `packaging/`):
 
-      git tag v0.2.0
-      git push origin v0.2.0
+      git tag v0.3.0
+      git push origin v0.3.0
 
   For a new version, first bump `version` in the root `Cargo.toml` and add its section to
   `CHANGELOG.md`; the release notes start with that section.

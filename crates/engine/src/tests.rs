@@ -783,3 +783,125 @@ fn a_swarf_cut_turns_the_table_as_the_wire_goes_down_and_simulates() {
     let back = crate::jobfile::from_json(&saved).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(back.cuts.first().map(|c| c.kind), Some(crate::cut::CutKind::Swarf));
 }
+
+#[test]
+fn several_models_cut_together_and_the_wire_keeps_out_of_the_others() {
+    let dir = std::env::temp_dir().join(format!("cosmiccut-two-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("brick.stl").to_string_lossy().into_owned();
+    let _ = std::fs::write(&path, box_stl([80.0, 60.0, 100.0]));
+    let mut s = Session::new();
+    run(&mut s, "stock.block", json!({ "width": 400.0, "depth": 400.0, "height": 200.0 }));
+    let a = run(&mut s, "model.import", json!({ "path": path, "units": "mm", "name": "Left" }));
+    let b = run(&mut s, "model.import", json!({ "path": path, "units": "mm", "name": "Right" }));
+    let (a, b) = (a["id"].as_str().unwrap_or_default().to_owned(), b["id"].as_str().unwrap_or_default().to_owned());
+    // Move one across, and turn it: where it stands and how it is turned are kept.
+    let moved = run(&mut s, "model.move", json!({ "id": b, "x": 150.0, "rz": 30.0, "rx": 0.0 }));
+    assert!((moved["rotate"].as_f64().unwrap_or(0.0) - 30.0).abs() < 1e-9, "{moved}");
+    let at = s.job.model(&b).map(|m| m.position(s.job.stock.bottom())).unwrap_or_default();
+    assert!((at.x - 150.0).abs() < 1e-3 && at.z.abs() < 1e-3, "{at}");
+    // Cutting the left one alone would take the wire through the right one at most angles.
+    let e = s.execute("cut.model", &json!({ "models": [a], "divisions": 4 }));
+    assert!(e.as_ref().err().is_some_and(|e| e.to_string().contains("Right")), "{e:?}");
+    // Both together: the wire follows the outline of both.
+    let c = run(&mut s, "cut.model", json!({ "models": [a, b], "divisions": 4 }));
+    assert!(c["moves"].as_u64().unwrap_or(0) > 10, "{c}");
+    // A profile through the middle of the table would cut the models.
+    let shape = run(&mut s, "shape.rectangle", json!({ "width": 50.0, "height": 50.0 }));
+    let e = s.execute("cut.profile", &json!({ "shape": shape["id"] }));
+    assert!(e.as_ref().err().is_some_and(|e| e.to_string().contains("would cut into")), "{e:?}");
+    // Saved and read back, the moved model stands where it was.
+    let back = crate::jobfile::from_json(&crate::jobfile::to_json(&s.job)).unwrap_or_else(|e| panic!("{e}"));
+    let m = back.models.iter().find(|m| m.id == b);
+    assert!(m.is_some_and(|m| (m.rotate - 30.0).abs() < 1e-9 && !m.centred && (m.at.x - 150.0).abs() < 1e-9));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_later_operation_can_pass_through_parts_already_taken_off() {
+    let dir = std::env::temp_dir().join(format!("cosmiccut-ops-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("part.stl").to_string_lossy().into_owned();
+    let _ = std::fs::write(&path, box_stl([60.0, 60.0, 100.0]));
+    let mut s = Session::new();
+    run(&mut s, "stock.block", json!({ "width": 600.0, "depth": 200.0, "height": 200.0 }));
+    let id = |v: Value| v["id"].as_str().unwrap_or_default().to_owned();
+    // Two parts at the ends of the block, cut in Op 1.
+    let left = id(run(&mut s, "model.import", json!({ "path": path, "units": "mm", "name": "Left" })));
+    run(&mut s, "model.move", json!({ "id": left, "x": -220.0 }));
+    // Ctrl+D puts a copy beside it; moved to the other end.
+    run(&mut s, "selection.set", json!({ "id": left }));
+    let right = id(run(&mut s, "edit.duplicate", json!({})));
+    assert_ne!(right, left);
+    let beside = s.job.model(&right).map(|m| m.position(s.job.stock.bottom()).x).unwrap_or_default();
+    assert!((beside - (-220.0 + 60.0 + 25.4)).abs() < 1e-3, "{beside}");
+    run(&mut s, "model.move", json!({ "id": right, "x": 220.0 }));
+    // With the centre part still on the table, the ends cannot be cut from the model: away from
+    // 0° the wire runs along the row through it, and at 0° a pass held at the bottom leaves level
+    // out of the far side, through it.
+    let centre = id(run(&mut s, "model.import", json!({ "path": path, "units": "mm", "name": "Centre" })));
+    assert!(s.execute("cut.model", &json!({ "models": [left, right], "divisions": 2 })).is_err());
+    let ends = s.execute("cut.model", &json!({ "models": [left, right], "spacing": "degrees", "degrees": 180.0 }));
+    assert!(ends.is_err());
+    // In Op 2 the ends are gone. The cut alone fails...
+    run(&mut s, "op.add", json!({ "name": "Centre parts" }));
+    assert!(s.execute("cut.model", &json!({ "models": [centre], "divisions": 2 })).is_err());
+    // ...unless the cut ignores them,
+    run(&mut s, "cut.model", json!({ "models": [centre], "divisions": 2, "ignore": [left, right] }));
+    // or its operation does.
+    let op = s.job.active_op.clone();
+    run(&mut s, "op.edit", json!({ "id": op, "ignore": [left, right] }));
+    run(&mut s, "cut.model", json!({ "models": [centre], "divisions": 2 }));
+    assert!(s.job.cuts.iter().all(|c| c.error.is_none()));
+    // Taking the operation's list away leaves only the cut that ignores them itself working.
+    run(&mut s, "op.edit", json!({ "id": op, "ignore": [] }));
+    assert_eq!(s.job.cuts.iter().filter(|c| c.error.is_some()).count(), 1);
+    // The list is saved with the job.
+    run(&mut s, "op.edit", json!({ "id": op, "ignore": [left] }));
+    let back = crate::jobfile::from_json(&crate::jobfile::to_json(&s.job)).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(back.ops.iter().find(|o| o.id == op).map(|o| o.ignore.clone()), Some(vec![left.clone()]));
+    // Copy and paste a model: the copy stands beside it too.
+    run(&mut s, "selection.set", json!({ "id": centre }));
+    run(&mut s, "edit.copy", json!({}));
+    let pasted = id(json!({ "id": run(&mut s, "edit.paste", json!({}))["pasted"] }));
+    let x = s.job.model(&pasted).map(|m| m.position(s.job.stock.bottom()).x).unwrap_or_default();
+    assert!((x - (60.0 + 25.4)).abs() < 1e-3, "{x}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_profile_can_leave_lines_out_and_start_from_the_end_chosen() {
+    let mut s = Session::new();
+    run(&mut s, "stock.block", json!({ "width": 600.0, "depth": 200.0, "height": 200.0 }));
+    let shape = run(&mut s, "shape.rectangle", json!({ "width": 100.0, "height": 100.0 }));
+    let id = shape["id"].as_str().unwrap_or_default().to_owned();
+    // A part at the left end of the block, standing on its bottom.
+    let at = json!({ "shape": id, "anchor": "bottom_left", "x": -280.0, "y": 0.0, "bottom": "through" });
+    let lines = {
+        let cx = s.job.context();
+        crate::cut::profile_lines(&cx, &at).unwrap_or_else(|e| panic!("{e}")).1
+    };
+    assert_eq!(lines.len(), 4, "{lines:?}");
+    // Leave out its bottom, and start at the bottom-left corner.
+    let bottom =
+        lines.iter().find(|(_, pts)| pts.iter().all(|p| p.y.abs() < 1e-6)).map(|(id, _)| *id).unwrap_or_default();
+    let mut p = at.clone();
+    p["skip"] = json!([bottom]);
+    p["start_x"] = json!(-280.0);
+    p["start_y"] = json!(0.0);
+    run(&mut s, "cut.profile", p);
+    let cut = &s.job.cuts[0];
+    assert!(cut.error.is_none(), "{:?}", cut.error);
+    let moves: Vec<_> = cut.path.moves.iter().filter(|m| m.kind != crate::wire::MoveKind::Rapid).collect();
+    // In from the left at the bottom, round the part, and out to the left again along the bottom:
+    // the part-off goes to the outside, never towards the middle of the block.
+    let first = moves.first().map(|m| m.to).unwrap_or_default();
+    let last = moves.last().map(|m| m.to).unwrap_or_default();
+    assert!((first.u + 280.0).abs() < 1e-6 && first.h.abs() < 1e-6, "{first:?}");
+    assert!(last.u < -300.0 && last.h.abs() < 1e-6, "{last:?}");
+    assert!(moves.iter().all(|m| m.to.u <= -180.0 + 1e-6), "the wire stays at the left end");
+    // The simulation keeps the part.
+    let keep = cut.keeps.first().map(|k| k.regions.clone()).unwrap_or_default();
+    assert!(CosmicCut_geom::region::contains(&keep, glam::DVec2::new(-230.0, 50.0)));
+    assert!(!CosmicCut_geom::region::contains(&keep, glam::DVec2::new(0.0, 50.0)));
+}

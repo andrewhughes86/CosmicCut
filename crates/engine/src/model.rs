@@ -34,6 +34,10 @@ pub struct Model {
     pub down: DVec3,
     /// Turn about the table's axis after laying it down, degrees.
     pub rotate: f64,
+    /// Tilts after laying it down, before the turn: about the table's X axis, then its Y axis,
+    /// degrees.
+    pub tilt_x: f64,
+    pub tilt_y: f64,
     pub scale: f64,
     /// Height of its bottom above the stock's bottom, mm.
     pub lift: f64,
@@ -70,6 +74,8 @@ impl Model {
             neighbours: Arc::default(),
             down: DVec3::NEG_Z,
             rotate: 0.0,
+            tilt_x: 0.0,
+            tilt_y: 0.0,
             scale: 1.0,
             lift: 0.0,
             centred: true,
@@ -78,13 +84,11 @@ impl Model {
         })
     }
 
-    /// Lays the model on the table: `down` pointing down, turned by `rotate`, scaled, centred on
-    /// the turntable's axis with its bottom `lift` above `floor`.
+    /// Lays the model on the table: `down` pointing down, tilted by `tilt_x` and `tilt_y`, turned
+    /// by `rotate`, scaled, centred on the turntable's axis (or at `at`) with its bottom `lift`
+    /// above `floor`.
     pub fn place(&mut self, floor: f64) {
-        let down = self.down.normalize_or(DVec3::NEG_Z).as_vec3();
-        let lay = Quat::from_rotation_arc(down, Vec3::NEG_Z);
-        let turn = Quat::from_rotation_z((self.rotate as f32).to_radians());
-        let q = turn * lay;
+        let q = self.orientation();
         let s = self.scale as f32;
         let turned: Vec<Vec3> = self.raw.positions().iter().map(|p| q * (*p * s)).collect();
         let b = Aabb::from_points(turned.iter().copied());
@@ -99,6 +103,30 @@ impl Model {
         if let Ok(m) = Mesh::new(placed, self.raw.triangles().to_vec()) {
             self.mesh = Arc::new(m);
         }
+    }
+
+    /// The turn that takes the model as read to how it stands on the table.
+    pub fn orientation(&self) -> Quat {
+        let down = self.down.normalize_or(DVec3::NEG_Z).as_vec3();
+        let lay = Quat::from_rotation_arc(down, Vec3::NEG_Z);
+        let tilt = Quat::from_rotation_y((self.tilt_y as f32).to_radians())
+            * Quat::from_rotation_x((self.tilt_x as f32).to_radians());
+        Quat::from_rotation_z((self.rotate as f32).to_radians()) * tilt * lay
+    }
+
+    /// The axes the three turns are about, in the table frame: X (tilt_x), Y (tilt_y), Z (rotate).
+    pub fn turn_axes(&self) -> [DVec3; 3] {
+        let z = glam::DQuat::from_rotation_z(self.rotate.to_radians());
+        let y = z * glam::DQuat::from_rotation_y(self.tilt_y.to_radians());
+        [y * DVec3::X, z * DVec3::Y, DVec3::Z]
+    }
+
+    /// Where the model stands: its middle across and along the table, and its bottom's height
+    /// above `floor`, mm.
+    pub fn position(&self, floor: f64) -> DVec3 {
+        let b = self.bounds();
+        let mid = (b.min + b.max).as_dvec3() / 2.0;
+        DVec3::new(mid.x, mid.y, f64::from(b.min.z) - floor)
     }
 
     /// The down direction that lays the face holding `triangle` flat on the table: a flat
@@ -175,6 +203,8 @@ impl Model {
             "max": b.max.to_array(),
             "down": [self.down.x, self.down.y, self.down.z],
             "rotate": self.rotate,
+            "tilt_x": self.tilt_x,
+            "tilt_y": self.tilt_y,
             "scale": self.scale,
             "lift": self.lift,
             "centred": self.centred,
@@ -188,7 +218,8 @@ impl Model {
         json!({
             "id": self.id, "name": self.name, "source": self.source, "units": self.units,
             "down": [self.down.x, self.down.y, self.down.z],
-            "rotate": self.rotate, "scale": self.scale, "lift": self.lift, "visible": self.visible,
+            "rotate": self.rotate, "tilt_x": self.tilt_x, "tilt_y": self.tilt_y,
+            "scale": self.scale, "lift": self.lift, "visible": self.visible,
             "centred": self.centred, "at": [self.at.x, self.at.y],
         })
     }
@@ -203,6 +234,7 @@ impl Model {
             ("Faces".into(), self.faces.faces.len().to_string()),
             ("Face down".into(), format!("{:.3}, {:.3}, {:.3}", d.x, d.y, d.z)),
             ("Turned".into(), format!("{:.1}°", self.rotate)),
+            ("Tilted".into(), format!("{:.1}° about X, {:.1}° about Y", self.tilt_x, self.tilt_y)),
             ("Scale".into(), format!("{}", self.scale)),
             ("Bottom".into(), units.fmt_len(f64::from(b.min.z))),
             (

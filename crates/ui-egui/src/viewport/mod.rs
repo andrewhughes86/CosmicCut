@@ -4,6 +4,7 @@
 //! the floor grid stay put.
 
 mod dims;
+mod gizmo;
 mod gpu;
 mod overlay;
 mod scene;
@@ -62,6 +63,9 @@ pub struct Viewport {
     wire_key: Option<[i64; 4]>,
     /// The model being laid flat: clicking one of its faces puts that face on the table.
     pub lay_flat: Option<String>,
+    /// The model the Move tool's handles are on.
+    pub moving: Option<String>,
+    gizmo: gizmo::Gizmo,
     /// The triangle of that model under the pointer, and the face last highlighted.
     hover_triangle: Option<usize>,
     highlight_key: Option<String>,
@@ -70,6 +74,12 @@ pub struct Viewport {
     pub face_pick: Option<(String, Vec<usize>, bool)>,
     pub picked_face: Option<Vec<usize>>,
     pub stop_face_pick: bool,
+    /// A profile's lines while picking which to leave out: the table angle, each line (id,
+    /// points in the cut plane, left out), whether picking; set by the app each frame. The line
+    /// clicked, and Esc, go back the same way.
+    pub line_pick: Option<LinePick>,
+    pub picked_line: Option<u32>,
+    pub stop_line_pick: bool,
     /// The faces a click would pick now: (model, face under the pointer, Alt held, the faces).
     hover_surface: Option<(String, usize, bool, Vec<usize>)>,
     /// The turntable's angle the frame is drawn at, degrees.
@@ -115,6 +125,11 @@ impl Viewport {
             picked_face: None,
             stop_face_pick: false,
             hover_surface: None,
+            line_pick: None,
+            picked_line: None,
+            stop_line_pick: false,
+            moving: None,
+            gizmo: gizmo::Gizmo::default(),
             table_b: 0.0,
             pending_upload: None,
             animating: false,
@@ -155,9 +170,34 @@ impl Viewport {
         }
         let mut cam = self.shown;
         cam.projection = session.view.camera.projection;
-        // In a sketch the left button draws and drags; the view pans and zooms but does not turn.
-        let caps =
-            if session.view.sketch.is_some() { NavCaps { orbit: false, ..NavCaps::FULL } } else { NavCaps::FULL };
+        // The Move tool's handles, on a model that is still there, out of the simulation and sketches.
+        if self.moving.as_deref().is_some_and(|id| session.job.model(id).is_none()) {
+            self.moving = None;
+        }
+        let moving = self.moving.clone().filter(|_| session.sim.is_none() && session.view.sketch.is_none());
+        let mut gizmo = std::mem::take(&mut self.gizmo);
+        let grab = match moving.as_deref().and_then(|id| session.job.model(id)) {
+            Some(m) => {
+                let project = |p: glam::DVec3| self.project(rect, p.as_vec3());
+                let basis = table_camera(&self.shown, self.table_b).basis();
+                let view = gizmo::View {
+                    rect,
+                    project: &project,
+                    toward: -basis.forward.as_dvec3(),
+                    right: basis.right.as_dvec3(),
+                };
+                gizmo.grabs(ui, &view, m)
+            }
+            None => false,
+        };
+        self.gizmo = gizmo;
+        // In a sketch the left button draws and drags, and on a Move handle it drags the handle;
+        // the view pans and zooms but does not turn.
+        let caps = if session.view.sketch.is_some() || grab {
+            NavCaps { orbit: false, ..NavCaps::FULL }
+        } else {
+            NavCaps::FULL
+        };
         if navigation::handle(ui, &response, &mut cam, caps) {
             session.view.camera = cam;
             self.shown = cam;
@@ -292,6 +332,118 @@ impl Viewport {
             if picked.is_some() {
                 self.picked_start = picked;
             }
+            // With no tool using the pointer, a click picks the model under it (or nothing), and
+            // the Move handles follow it.
+            let free = session.view.sketch.is_none()
+                && !self.picking_plane
+                && self.pick_start.is_none()
+                && self.lay_flat.is_none()
+                && !self.face_pick.as_ref().is_some_and(|(_, _, on)| *on)
+                && self.line_pick.is_none()
+                && !grab;
+            if free && response.clicked_by(egui::PointerButton::Primary) {
+                let hit = response.interact_pointer_pos().and_then(|p| self.ray(rect, p)).and_then(|(o, d)| {
+                    session
+                        .job
+                        .models
+                        .iter()
+                        .filter(|m| m.visible)
+                        .filter_map(|m| m.mesh.raycast(o, d).map(|(t, _)| (t, m.id.clone())))
+                        .min_by(|a, b| a.0.total_cmp(&b.0))
+                        .map(|(_, id)| id)
+                });
+                if hit.is_some() || session.view.selection.as_deref().is_some_and(|s| s.starts_with("model.")) {
+                    requests.push(("selection.set".into(), json!({ "id": hit })));
+                }
+                if let Some(id) = &hit
+                    && self.moving.is_some()
+                {
+                    self.moving = Some(id.clone());
+                }
+            }
+            if let Some((b, lines, true)) = &self.line_pick {
+                instructions = "Leave out lines: click a line of the shape to leave it out of the cut (dashed), or \
+                                click a dashed one to put it back. Pick the start point (Path) to say which end the \
+                                wire starts from.\nEsc or right-click when done."
+                    .to_owned();
+                let to_screen = |q: &glam::DVec2| {
+                    let p = CosmicCut_engine::wire::on_wire(&CosmicCut_engine::wire::WirePos::new(q.x, q.y, *b), 0.0);
+                    self.project(rect, p.as_vec3())
+                };
+                let screen: Vec<(u32, Vec<Pos2>, bool)> = lines
+                    .iter()
+                    .map(|(id, pts, out)| (*id, pts.iter().filter_map(to_screen).collect(), *out))
+                    .collect();
+                let pointer = response.hover_pos();
+                let near = pointer.and_then(|p| {
+                    screen
+                        .iter()
+                        .map(|(id, pts, _)| {
+                            let d = pts
+                                .windows(2)
+                                .filter_map(|w| match w {
+                                    [a, c] => Some(segment_distance(p, *a, *c)),
+                                    _ => None,
+                                })
+                                .fold(f32::INFINITY, f32::min);
+                            (*id, d)
+                        })
+                        .filter(|(_, d)| *d < 8.0)
+                        .min_by(|a, b| a.1.total_cmp(&b.1))
+                        .map(|(id, _)| id)
+                });
+                let painter = ui.painter_at(rect);
+                for (id, pts, out) in &screen {
+                    let lit = near == Some(*id);
+                    let colour = match (out, lit) {
+                        (_, true) => tokens.warning,
+                        (true, false) => tokens.text_muted,
+                        (false, false) => tokens.accent,
+                    };
+                    let width = if lit { 4.0 } else { 2.5 };
+                    if *out {
+                        for w in pts.windows(2) {
+                            if let [a, c] = w {
+                                painter.add(egui::Shape::dashed_line(
+                                    &[*a, *c],
+                                    egui::Stroke::new(width, colour),
+                                    6.0,
+                                    5.0,
+                                ));
+                            }
+                        }
+                    } else {
+                        painter.add(egui::Shape::line(pts.clone(), egui::Stroke::new(width, colour)));
+                    }
+                }
+                if near.is_some() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if response.clicked_by(egui::PointerButton::Primary) {
+                    self.picked_line = near;
+                }
+                if response.secondary_clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    self.stop_line_pick = true;
+                }
+            }
+            if let Some(m) = moving.as_deref().and_then(|id| session.job.model(id)) {
+                let mut gizmo = std::mem::take(&mut self.gizmo);
+                let project = |p: glam::DVec3| self.project(rect, p.as_vec3());
+                let basis = table_camera(&self.shown, self.table_b).basis();
+                let view = gizmo::View {
+                    rect,
+                    project: &project,
+                    toward: -basis.forward.as_dvec3(),
+                    right: basis.right.as_dvec3(),
+                };
+                let floor = session.job.stock.bottom();
+                let done = gizmo.show(ui, &view, &response, m, floor, session.prefs.units, tokens, requests);
+                instructions = gizmo.instructions().to_owned();
+                self.gizmo = gizmo;
+                if done {
+                    self.moving = None;
+                }
+            }
             self.instructions = instructions;
             self.sketch_ui = sketch_ui;
         }
@@ -341,9 +493,24 @@ impl Viewport {
         scene::turntable(&mut content, job.machine.table_radius as f32, machine, palette.grid_major);
         // Models (before the see-through stock, which would hide them), with their outline
         // where the mesh is small enough to work it out quickly.
+        // The selected one tinted, its edges in the accent.
+        let accent = theme::linear(tokens.accent);
         for m in job.models.iter().filter(|m| m.visible && !simulating) {
-            let edges = (m.mesh.triangles().len() < 300_000).then_some(palette.part_edge);
-            content.push_mesh(&m.mesh, palette.part, edges);
+            let picked = session.view.selection.as_deref() == Some(m.id.as_str());
+            let edge = if picked { accent } else { palette.part_edge };
+            let edges = (m.mesh.triangles().len() < 300_000).then_some(edge);
+            let fill = if picked {
+                let mix = |a: f32, b: f32| a + (b - a) * 0.3;
+                [
+                    mix(palette.part[0], accent[0]),
+                    mix(palette.part[1], accent[1]),
+                    mix(palette.part[2], accent[2]),
+                    palette.part[3],
+                ]
+            } else {
+                palette.part
+            };
+            content.push_mesh(&m.mesh, fill, edges);
         }
         if display.stock && !simulating {
             let fill = theme::linear(tokens.stock.gamma_multiply(0.16));
@@ -686,22 +853,24 @@ impl Viewport {
     /// swarf cut's faces (and the surface under the pointer while picking them).
     fn update_highlight(&mut self, session: &Session, tokens: &Tokens) {
         let Some(gpu) = &mut self.gpu else { return };
-        let mut faces: Vec<(usize, f32)> = Vec::new();
+        // (face, colour): picked swarf faces in their own colour, the surface under the pointer
+        // in the accent.
+        let mut faces: Vec<(usize, egui::Color32)> = Vec::new();
         let mut on: Option<&CosmicCut_engine::model::Model> = None;
         if let Some((id, picked, picking)) = &self.face_pick {
             on = session.job.model(id);
             if on.is_some() {
-                faces.extend(picked.iter().map(|f| (*f, 0.55)));
+                faces.extend(picked.iter().map(|f| (*f, tokens.warning.gamma_multiply(0.9))));
                 if let Some((_, _, _, hover)) =
                     self.hover_surface.as_ref().filter(|_| *picking && self.hover_triangle.is_some())
                 {
-                    faces.extend(hover.iter().map(|f| (*f, 0.85)));
+                    faces.extend(hover.iter().map(|f| (*f, tokens.accent.gamma_multiply(0.9))));
                 }
             }
         } else if let Some(m) = self.lay_flat.as_deref().and_then(|id| session.job.model(id)) {
             on = Some(m);
             if let Some(t) = self.hover_triangle {
-                faces.push((m.faces.face_of(t).unwrap_or(t), 0.7));
+                faces.push((m.faces.face_of(t).unwrap_or(t), tokens.accent.gamma_multiply(0.7)));
             }
         }
         let key = on.map(|m| format!("{} {faces:?} {}", m.id, session.job.revision));
@@ -710,8 +879,8 @@ impl Viewport {
         }
         let mut g = SceneGeometry::default();
         if let Some(m) = on {
-            for (face, strength) in &faces {
-                let colour = theme::linear(tokens.accent.gamma_multiply(*strength));
+            for (face, colour) in &faces {
+                let colour = theme::linear(*colour);
                 let tris: Vec<usize> =
                     if m.faces.faces.is_empty() { vec![*face] } else { m.faces.triangles_of(*face).collect() };
                 for tri in tris {
@@ -947,6 +1116,17 @@ fn playback(ui: &mut Ui, viewport: Rect, session: &Session, tokens: &Tokens, req
 fn trim(v: f64) -> String {
     let s = format!("{v:.2}");
     s.trim_end_matches('0').trim_end_matches('.').to_owned()
+}
+
+/// A profile's lines while picking: the table angle, each line (id, points in the cut plane,
+/// left out), and whether picking.
+pub type LinePick = (f64, Vec<(u32, Vec<glam::DVec2>, bool)>, bool);
+
+/// Distance from `p` to the segment `a`–`b`, points.
+fn segment_distance(p: Pos2, a: Pos2, b: Pos2) -> f32 {
+    let ab = b - a;
+    let t = if ab.length_sq() > 1.0e-6 { ((p - a).dot(ab) / ab.length_sq()).clamp(0.0, 1.0) } else { 0.0 };
+    p.distance(a + ab * t)
 }
 
 #[cfg(test)]

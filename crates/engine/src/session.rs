@@ -337,11 +337,23 @@ impl JobState {
         if !taken(base) {
             return base.to_owned();
         }
-        (2..).map(|k| format!("{base} {k}")).find(|n| !taken(n)).unwrap_or_else(|| base.to_owned())
+        // A copy of "Part 2" is "Part 3", not "Part 2 2".
+        let stem = match base.rsplit_once(' ') {
+            Some((stem, n)) if !stem.is_empty() && n.parse::<u32>().is_ok() => stem,
+            _ => base,
+        };
+        (2..).map(|k| format!("{stem} {k}")).find(|n| !taken(n)).unwrap_or_else(|| base.to_owned())
     }
 
     pub fn context(&self) -> Context<'_> {
-        Context { machine: &self.machine, stock: &self.stock, shapes: &self.shapes, models: &self.models }
+        Context { machine: &self.machine, stock: &self.stock, shapes: &self.shapes, models: &self.models, ignore: &[] }
+    }
+
+    /// What a cut in operation `op` is made with: the job, less the models the operation says
+    /// are off the table.
+    pub fn context_for(&self, op: &str) -> Context<'_> {
+        let ignore = self.ops.iter().find(|o| o.id == op).map_or(&[][..], |o| o.ignore.as_slice());
+        Context { ignore, ..self.context() }
     }
 
     pub fn shape(&self, id: &str) -> Option<&Shape> {
@@ -373,10 +385,8 @@ impl JobState {
     /// puts the models back on the stock.
     pub fn rebuild(&mut self) {
         self.place_models();
-        let built: Vec<EngineResult<Built>> = {
-            let cx = self.context();
-            self.cuts.iter().map(|c| crate::cut::build(&cx, c.kind, &c.params)).collect()
-        };
+        let built: Vec<EngineResult<Built>> =
+            { self.cuts.iter().map(|c| crate::cut::build(&self.context_for(&c.op), c.kind, &c.params)).collect() };
         for (c, b) in self.cuts.iter_mut().zip(built) {
             match b {
                 Ok(b) => {
@@ -652,7 +662,9 @@ impl Session {
             o.remove("id");
         }
         spec.validate(&p)?;
-        let cx = self.job.context();
+        // The cut being changed keeps its operation; a new one goes into the active one.
+        let editing = params.get("id").and_then(Value::as_str).and_then(|id| self.job.cut(id));
+        let cx = self.job.context_for(editing.map_or(self.job.active_op.as_str(), |c| c.op.as_str()));
         catch_unwind(AssertUnwindSafe(|| crate::cut::build(&cx, kind, &p)))
             .unwrap_or_else(|_| Err(EngineError::Internal("the preview failed".into())))
     }

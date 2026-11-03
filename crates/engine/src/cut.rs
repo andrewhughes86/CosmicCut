@@ -216,6 +216,8 @@ pub struct Context<'a> {
     pub stock: &'a Stock,
     pub shapes: &'a [Shape],
     pub models: &'a [crate::model::Model],
+    /// Models taken off the table before the cut's operation: the wire may pass through them.
+    pub ignore: &'a [String],
 }
 
 impl Context<'_> {
@@ -239,14 +241,78 @@ pub struct Built {
 }
 
 pub fn build(cx: &Context<'_>, kind: CutKind, p: &Value) -> EngineResult<Built> {
-    match kind {
+    let built = match kind {
         CutKind::Profile => profile(cx, p),
         CutKind::TwoView => two_view(cx, p),
         CutKind::Lathe => lathe(cx, p),
         CutKind::Slab => slab(cx, p),
         CutKind::Model => model_cut(cx, p),
         CutKind::Swarf => crate::swarf::swarf(cx, p),
+    }?;
+    // The wire must not touch the models this cut is not making.
+    let own: Vec<String> = match kind {
+        CutKind::Model => cut_models(cx, p)?.iter().map(|m| m.id.clone()).collect(),
+        CutKind::Swarf => crate::swarf::model_of(cx, p)?.into_iter().map(|m| m.id.clone()).collect(),
+        _ => Vec::new(),
+    };
+    let kerf = params::opt_f64(p, "kerf", 0.0, 50.0)?.unwrap_or(cx.machine.kerf);
+    // Models the cut or its operation says are off the table by then do not count.
+    let ignored: Vec<&str> = p
+        .get("ignore")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let others: Vec<&crate::model::Model> = cx
+        .models
+        .iter()
+        .filter(|m| !own.contains(&m.id) && !ignored.contains(&m.id.as_str()) && !cx.ignore.contains(&m.id))
+        .collect();
+    crate::interference::check(&others, &built, kerf / 2.0)?;
+    Ok(built)
+}
+
+/// The models a cut from models makes: those its `models` list names, else the one `model`
+/// names, else every model in the job.
+pub fn cut_models<'a>(cx: &Context<'a>, p: &Value) -> EngineResult<Vec<&'a crate::model::Model>> {
+    let find = |id: &str| {
+        cx.models
+            .iter()
+            .find(|m| m.id == id || m.name == id)
+            .ok_or_else(|| EngineError::InvalidParams(format!("there is no model `{id}`")))
+    };
+    let listed: Vec<&str> = p
+        .get("models")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let out: Vec<&crate::model::Model> = if !listed.is_empty() {
+        listed.into_iter().map(find).collect::<EngineResult<_>>()?
+    } else if let Some(id) = params::opt_str(p, "model")? {
+        vec![find(id)?]
+    } else {
+        cx.models.iter().collect()
+    };
+    if out.is_empty() {
+        return Err(EngineError::InvalidParams("import a model first".into()));
     }
+    Ok(out)
+}
+
+/// The models as one mesh, so the wire follows the outline of them all together.
+fn merged(models: &[&crate::model::Model]) -> EngineResult<std::sync::Arc<CosmicCut_geom::Mesh>> {
+    if let [one] = models {
+        return Ok(std::sync::Arc::clone(&one.mesh));
+    }
+    let mut positions = Vec::new();
+    let mut triangles = Vec::new();
+    for m in models {
+        let base = positions.len() as u32;
+        positions.extend_from_slice(m.mesh.positions());
+        triangles.extend(m.mesh.triangles().iter().map(|t| t.map(|i| i + base)));
+    }
+    CosmicCut_geom::Mesh::new(positions, triangles)
+        .map(std::sync::Arc::new)
+        .map_err(|e| EngineError::InvalidParams(format!("the models cannot be cut together: {e}")))
 }
 
 pub const SPACINGS: &[&str] = &["divide", "degrees"];
@@ -272,17 +338,14 @@ pub fn wire_floor(cx: &Context<'_>, kerf: f64) -> f64 {
 /// seen along it, the part held on the foam under it until the part-off at the end.
 fn model_cut(cx: &Context<'_>, p: &Value) -> EngineResult<Built> {
     let c = common(cx, p)?;
-    let model = match params::opt_str(p, "model")? {
-        Some(id) => cx.models.iter().find(|m| m.id == id || m.name == id),
-        None => cx.models.first(),
-    }
-    .ok_or_else(|| EngineError::InvalidParams("import a model first".into()))?;
+    let chosen = cut_models(cx, p)?;
+    let model = merged(&chosen)?;
     let angles = model_angles(p)?;
     needs_b(cx, &angles)?;
     let alternate = params::opt_bool(p, "alternate")?.unwrap_or(true);
     let low = wire_floor(cx, c.kerf);
     let mut out = Built { path: WirePath::new(park(cx.machine, cx.stock, 0.0)), ..Built::default() };
-    let bottom = f64::from(model.mesh.bounds().min.z);
+    let bottom = f64::from(model.bounds().min.z);
     if bottom < low - 1.0e-6 {
         out.warnings.push(format!(
             "the bottom {:.1} mm of the model is lower than the wire reaches; it stays joined to the foam under it \
@@ -291,12 +354,12 @@ fn model_cut(cx: &Context<'_>, p: &Value) -> EngineResult<Built> {
         ));
     }
     for (k, b) in angles.iter().enumerate() {
-        let paths = crate::model::clip_above(crate::model::silhouette(&model.mesh, *b, false, 0.02), low);
+        let paths = crate::model::clip_above(crate::model::silhouette(&model, *b, false, 0.02), low);
         if paths.is_empty() {
             return Err(EngineError::InvalidParams("the model has no outline above what the wire reaches".into()));
         }
         let (lead, direction) = pass_way("left", "ccw", alternate && k % 2 == 1);
-        profile_pass(cx, &c, &paths, *b, lead, false, direction, Some(0.0), None, &mut out)?;
+        profile_pass(cx, &c, &paths, *b, lead, false, direction, Some(0.0), None, None, &mut out)?;
     }
     if !wants_release(p)? {
         out.release = None;
@@ -334,6 +397,35 @@ pub(crate) fn common(cx: &Context<'_>, p: &Value) -> EngineResult<Common> {
 /// The shape scaled, turned and mirrored per `p`, then moved so its anchor lands where `p`
 /// (or, by default, the stock's middle at angle `b`) says. Returns the paths in (u, h).
 fn place(cx: &Context<'_>, shape: &Shape, p: &Value, b: f64, prefix: &str) -> EngineResult<Vec<Path2>> {
+    Ok(placing(cx, shape, p, b, prefix)?.paths(&shape.paths))
+}
+
+/// How a shape's points land in the cut plane: scaled, turned and mirrored about its origin, then
+/// moved so its anchor sits where `p` says. Worked out from the whole shape, so leaving some of
+/// its lines out does not move the rest.
+struct Placing {
+    scale: f64,
+    turn: (f64, f64),
+    mirror: bool,
+    shift: DVec2,
+}
+
+impl Placing {
+    fn point(&self, q: DVec2) -> DVec2 {
+        let q = if self.mirror { DVec2::new(-q.x, q.y) } else { q } * self.scale;
+        let (s, c) = self.turn;
+        DVec2::new(q.x * c - q.y * s, q.x * s + q.y * c) + self.shift
+    }
+
+    fn paths(&self, paths: &[Path2]) -> Vec<Path2> {
+        paths
+            .iter()
+            .map(|q| Path2 { closed: q.closed, points: q.points.iter().map(|pt| self.point(*pt)).collect() })
+            .collect()
+    }
+}
+
+fn placing(cx: &Context<'_>, shape: &Shape, p: &Value, b: f64, prefix: &str) -> EngineResult<Placing> {
     let key = |k: &str| format!("{prefix}{k}");
     let scale = params::opt_f64(p, &key("scale"), 1.0e-6, 1.0e6)?.or(params::opt_f64(p, "scale", 1.0e-6, 1.0e6)?);
     let rotate = params::opt_f64(p, &key("rotate"), -3600.0, 3600.0)?.unwrap_or(0.0);
@@ -357,11 +449,28 @@ fn place(cx: &Context<'_>, shape: &Shape, p: &Value, b: f64, prefix: &str) -> En
         Ok(params::opt_f64(p, &key(k), -1.0e6, 1.0e6)?.or(params::opt_f64(p, k, -1.0e6, 1.0e6)?).unwrap_or(default))
     };
     let to = DVec2::new(at("x", default_to.x)?, at("y", default_to.y)?);
-    let shift = to - from;
-    Ok(paths
-        .into_iter()
-        .map(|q| Path2 { closed: q.closed, points: q.points.into_iter().map(|pt| pt + shift).collect() })
-        .collect())
+    Ok(Placing { scale: scale.unwrap_or(1.0), turn: rotate.to_radians().sin_cos(), mirror, shift: to - from })
+}
+
+/// The curves (by id) of a profile cut's shape, where they lie in the cut plane at its first
+/// angle, and that angle: for picking the lines it leaves out. Empty if the shape is not a sketch.
+pub fn profile_lines(cx: &Context<'_>, p: &Value) -> EngineResult<(f64, Curves)> {
+    let shape = cx.shape(p, "shape")?;
+    let b = angle(p, "angle", 0.0)?;
+    let at = placing(cx, shape, p, b, "")?;
+    let curves = shape.sketch.as_ref().map(|s| s.curves()).unwrap_or_default();
+    Ok((b, curves.into_iter().map(|(id, pts)| (id, pts.into_iter().map(|q| at.point(q)).collect())).collect()))
+}
+
+/// Curves of a sketch by id, each as points along it.
+pub type Curves = Vec<(u32, Vec<DVec2>)>;
+
+/// The curve ids a profile cut leaves out.
+fn skipped(p: &Value) -> Vec<u32> {
+    p.get("skip")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_u64).filter_map(|v| u32::try_from(v).ok()).collect())
+        .unwrap_or_default()
 }
 
 fn bounds(paths: &[Path2]) -> (DVec2, DVec2) {
@@ -387,6 +496,7 @@ fn profile_pass(
     direction: &str,
     attach: Option<f64>,
     start: Option<DVec2>,
+    middle: Option<DVec2>,
     out: &mut Built,
 ) -> EngineResult<()> {
     let loops: Vec<Vec<DVec2>> =
@@ -405,14 +515,17 @@ fn profile_pass(
     }
     // The part edge is half a kerf in from the wire.
     let part = region::offset(&wire_regions, -grow.signum() * c.kerf / 2.0, TOL);
-    out.keeps.push(Keep {
-        b,
-        regions: if c.compensate { regions } else { part },
-        outside: keep_outside,
-        at: 0,
-        sweep: None,
+    // What the closed outlines keep (open ones keep their own, below).
+    let keep_index = (!loops.is_empty()).then(|| {
+        out.keeps.push(Keep {
+            b,
+            regions: if c.compensate { regions } else { part },
+            outside: keep_outside,
+            at: 0,
+            sweep: None,
+        });
+        out.keeps.len() - 1
     });
-    let keep_index = out.keeps.len() - 1;
 
     let (u0, u1) = cx.stock.u_range(b);
     let (_, h1) = (cx.stock.bottom(), cx.stock.top());
@@ -531,27 +644,70 @@ fn profile_pass(
         out.path.push(MoveKind::Lead, WirePos::new(s.x, s.y, b), c.feed);
         waits += 1;
     }
-    // Open outlines: cut along them as drawn, from the nearer end, out past the stock.
+    // Open outlines (or outlines with lines left out): cut along them as they are, from the end
+    // nearest the start point (else nearest the wire). An end inside the foam is reached level
+    // from the nearest side (or down from the top) that does not cross the outline, and left the
+    // same way.
+    let (lo_h, hi_h) = (cx.stock.bottom(), h1);
+    let inside = |q: DVec2| q.x > u0 + 1.0e-6 && q.x < u1 - 1.0e-6 && q.y < hi_h - 1.0e-6 && q.y > lo_h - 1.0e-6;
+    let way_out = |pts: &[DVec2], at: usize| -> Option<(DVec2, &'static str)> {
+        let q = *pts.get(at)?;
+        let mut sides = [
+            ("left", DVec2::new(u0.min(q.x) - c.clearance, q.y)),
+            ("right", DVec2::new(u1.max(q.x) + c.clearance, q.y)),
+            ("top", DVec2::new(q.x, hi_h.max(q.y) + c.clearance)),
+        ];
+        sides.sort_by(|a, b| a.1.distance(q).total_cmp(&b.1.distance(q)));
+        let clear = sides.iter().find(|(_, out)| !crosses_chain(pts, at, q, *out));
+        clear.or(sides.first()).map(|(side, out)| (*out, *side))
+    };
     for q in open {
         let mut pts = q.points.clone();
         let (Some(first), Some(last)) = (pts.first().copied(), pts.last().copied()) else { continue };
         let at = out.path.end();
-        if last.distance_squared(at.uh()) < first.distance_squared(at.uh()) {
+        let from = start.unwrap_or(at.uh());
+        if last.distance_squared(from) < first.distance_squared(from) {
             pts.reverse();
         }
-        let a = pts.first().copied().unwrap_or_default();
-        travel(cx, c, &mut out.path, WirePos::new(a.x, a.y, b), lead);
+        let n = pts.len();
+        let (Some(a), Some(z)) = (pts.first().copied(), pts.last().copied()) else { continue };
+        let entry = if inside(a) { way_out(&pts, 0) } else { None };
+        let exit = if inside(z) { way_out(&pts, n - 1) } else { None };
+        match entry {
+            Some((s, side)) => {
+                travel(cx, c, &mut out.path, WirePos::new(s.x, s.y, b), side);
+                out.path.push(MoveKind::Lead, WirePos::new(a.x, a.y, b), c.feed);
+            }
+            None => travel(cx, c, &mut out.path, WirePos::new(a.x, a.y, b), lead),
+        }
         for pt in pts.iter().skip(1) {
             out.path.push(MoveKind::Cut, WirePos::new(pt.x, pt.y, b), c.feed);
         }
-        out.warnings.push("open outlines are cut as drawn and do not cut the part free".into());
+        if let Some((e, _)) = exit {
+            out.path.push(MoveKind::Lead, WirePos::new(e.x, e.y, b), c.feed);
+        }
+        // What it cuts away: the side of the outline (closed round the outside of the stock) that
+        // does not hold the part.
+        let s = entry.map_or(a, |(s, _)| s);
+        let e = exit.map_or(z, |(e, _)| e);
+        let mut chain = vec![s];
+        chain.extend(pts.iter().copied());
+        chain.push(e);
+        let margin = c.clearance * 2.0 + 10.0;
+        let frame = (DVec2::new(u0 - margin, lo_h - margin), DVec2::new(u1 + margin, hi_h + margin));
+        if let Some(region) = middle.and_then(|inner| enclosed(&chain, frame, inner)) {
+            out.keeps.push(Keep { b, regions: vec![region], outside: false, at: out.path.moves.len(), sweep: None });
+        } else {
+            out.warnings
+                .push("an open outline that does not run from outside the foam back to it cuts nothing free".into());
+        }
         waits += 1;
     }
     if waits == 0 {
         return Err(EngineError::InvalidParams("nothing to cut".into()));
     }
     let done = out.path.moves.len();
-    if let Some(k) = out.keeps.get_mut(keep_index) {
+    if let Some(k) = keep_index.and_then(|i| out.keeps.get_mut(i)) {
         k.at = done;
         // The foam under the attached part stays, below the level the wire came in at.
         if let Some(level) = lowest_level {
@@ -679,6 +835,82 @@ fn crosses_outline(l: &[DVec2], at: usize, a: DVec2, b: DVec2) -> bool {
         let d3 = (q - p).perp_dot(a - p);
         let d4 = (q - p).perp_dot(b - p);
         d1 * d2 < 0.0 && d3 * d4 < 0.0
+    })
+}
+
+/// Whether `a`–`b` (leaving the chain's point `at`) crosses the chain anywhere else.
+fn crosses_chain(pts: &[DVec2], at: usize, a: DVec2, b: DVec2) -> bool {
+    pts.windows(2).enumerate().any(|(i, w)| {
+        if i == at || i + 1 == at {
+            return false;
+        }
+        let (Some(&p), Some(&q)) = (w.first(), w.get(1)) else { return false };
+        let d1 = (b - a).perp_dot(p - a);
+        let d2 = (b - a).perp_dot(q - a);
+        let d3 = (q - p).perp_dot(a - p);
+        let d4 = (q - p).perp_dot(b - p);
+        d1 * d2 < 0.0 && d3 * d4 < 0.0
+    })
+}
+
+/// The region `chain` (from outside the stock, through it, back outside) closes off on the side
+/// holding `inner`: the chain, then round the edge of `frame` one way or the other. None if the
+/// ends are not out on the frame's sides or neither way holds `inner`.
+fn enclosed(chain: &[DVec2], frame: (DVec2, DVec2), inner: DVec2) -> Option<Region> {
+    let (lo, hi) = frame;
+    let (s, e) = (*chain.first()?, *chain.last()?);
+    // Out to the frame from an end: straight away from the stock on its side.
+    let to_frame = |p: DVec2| -> Option<DVec2> {
+        let mid = (lo + hi) / 2.0;
+        let inside_x = p.x > lo.x && p.x < hi.x;
+        if p.y >= hi.y - (hi.y - lo.y) * 0.25 && inside_x && p.y > mid.y {
+            Some(DVec2::new(p.x, hi.y))
+        } else if p.x <= mid.x {
+            Some(DVec2::new(lo.x, p.y))
+        } else {
+            Some(DVec2::new(hi.x, p.y))
+        }
+    };
+    let (fs, fe) = (to_frame(s)?, to_frame(e)?);
+    // Distance round the frame's edge, anticlockwise from its bottom-left corner.
+    let (w, h) = (hi.x - lo.x, hi.y - lo.y);
+    let around = |p: DVec2| -> f64 {
+        if (p.y - lo.y).abs() < 1.0e-9 {
+            p.x - lo.x
+        } else if (p.x - hi.x).abs() < 1.0e-9 {
+            w + (p.y - lo.y)
+        } else if (p.y - hi.y).abs() < 1.0e-9 {
+            w + h + (hi.x - p.x)
+        } else {
+            2.0 * w + h + (hi.y - p.y)
+        }
+    };
+    let corners =
+        [(w, DVec2::new(hi.x, lo.y)), (w + h, hi), (2.0 * w + h, DVec2::new(lo.x, hi.y)), (2.0 * (w + h), lo)];
+    let perimeter = 2.0 * (w + h);
+    // From the end's frame point back to the start's, one way round or the other.
+    let walk = |forward: bool| -> Vec<DVec2> {
+        let (t0, t1) = (around(fe), around(fs));
+        let span = if forward { (t1 - t0).rem_euclid(perimeter) } else { (t0 - t1).rem_euclid(perimeter) };
+        let mut along: Vec<(f64, DVec2)> = corners
+            .iter()
+            .flat_map(|&(t, c)| [(t, c), (t + perimeter, c)])
+            .filter_map(|(t, c)| {
+                let d = if forward { t - t0 } else { t0 - t };
+                let d = d.rem_euclid(perimeter);
+                (d > 1.0e-9 && d < span - 1.0e-9).then_some((d, c))
+            })
+            .collect();
+        along.sort_by(|a, b| a.0.total_cmp(&b.0));
+        along.dedup_by(|a, b| a.1.distance(b.1) < 1.0e-9);
+        let mut out = chain.to_vec();
+        out.push(fe);
+        out.extend(along.into_iter().map(|(_, c)| c));
+        out.push(fs);
+        out
+    };
+    [true, false].into_iter().map(walk).find(|ring| region::contains(&[vec![ring.clone()]], inner)).and_then(|ring| {
+        region::union_polygons(&[ring]).into_iter().find(|r| region::contains(std::slice::from_ref(r), inner))
     })
 }
 
@@ -830,10 +1062,19 @@ fn profile(cx: &Context<'_>, p: &Value) -> EngineResult<Built> {
     };
     needs_b(cx, &angles)?;
     let mut out = Built { path: WirePath::new(park(cx.machine, cx.stock, b0)), ..Built::default() };
+    let skip = skipped(p);
     for (k, b) in angles.into_iter().enumerate() {
-        let paths = place(cx, shape, p, b, "")?;
+        let full = place(cx, shape, p, b, "")?;
+        // Lines left out: the rest of the outline, where it was. The middle of the whole shape
+        // says which side of what is left the part is on.
+        let paths = match shape.sketch.as_deref().filter(|_| !skip.is_empty()) {
+            Some(sketch) => placing(cx, shape, p, b, "")?.paths(&sketch.paths_without(&skip)),
+            None => full.clone(),
+        };
+        let pts: Vec<DVec2> = full.iter().filter(|q| q.closed).flat_map(|q| q.points.iter().copied()).collect();
+        let part = (!pts.is_empty()).then(|| pts.iter().copied().sum::<DVec2>() / pts.len() as f64);
         let (lead, direction) = pass_way(lead, direction, alternate && k % 2 == 1);
-        profile_pass(cx, &c, &paths, b, lead, keep_outside, direction, attach, start, &mut out)?;
+        profile_pass(cx, &c, &paths, b, lead, keep_outside, direction, attach, start, part, &mut out)?;
     }
     if !wants_release(p)? {
         out.release = None;
@@ -855,10 +1096,10 @@ fn two_view(cx: &Context<'_>, p: &Value) -> EngineResult<Built> {
     let front_paths = place(cx, front, p, b0, "front_")?;
     let attach = bottom(p)?;
     let alternate = params::opt_bool(p, "alternate")?.unwrap_or(true);
-    profile_pass(cx, &c, &front_paths, b0, lead, false, direction, attach, None, &mut out)?;
+    profile_pass(cx, &c, &front_paths, b0, lead, false, direction, attach, None, None, &mut out)?;
     let side_paths = place(cx, side, p, b0 + 90.0, "side_")?;
     let (lead, direction) = pass_way(lead, direction, alternate);
-    profile_pass(cx, &c, &side_paths, b0 + 90.0, lead, false, direction, attach, None, &mut out)?;
+    profile_pass(cx, &c, &side_paths, b0 + 90.0, lead, false, direction, attach, None, None, &mut out)?;
     if !wants_release(p)? {
         out.release = None;
     }
@@ -1130,7 +1371,7 @@ mod tests {
     #[test]
     fn the_wire_goes_no_lower_than_machine_y0() -> EngineResult<()> {
         let (mut m, s, shapes) = job();
-        let cx = Context { machine: &m, stock: &s, shapes: &shapes, models: &[] };
+        let cx = Context { machine: &m, stock: &s, shapes: &shapes, models: &[], ignore: &[] };
         // A part standing on the table, cut right through: the wire runs along the table top,
         // not half a kerf under it.
         let on_table = json!({ "shape": "shape.1", "kerf": 1.0, "bottom": "through", "anchor": "bottom_centre" });
@@ -1142,7 +1383,7 @@ mod tests {
         assert!(along.len() >= 2, "the wire runs along the floor across the bottom");
         // With Y0 higher than the part's bottom, it runs level at Y0 and says so.
         m.wire_y0 = 20.0;
-        let cx = Context { machine: &m, stock: &s, shapes: &shapes, models: &[] };
+        let cx = Context { machine: &m, stock: &s, shapes: &shapes, models: &[], ignore: &[] };
         let b = build(&cx, CutKind::Profile, &on_table)?;
         let lowest = b.path.moves.iter().map(|q| q.to.h).fold(f64::INFINITY, f64::min);
         assert!((lowest - 20.0).abs() < 1e-9, "{lowest}");
@@ -1153,7 +1394,7 @@ mod tests {
     #[test]
     fn a_profile_enters_from_the_left_and_comes_back() -> EngineResult<()> {
         let (m, s, shapes) = job();
-        let cx = Context { machine: &m, stock: &s, shapes: &shapes, models: &[] };
+        let cx = Context { machine: &m, stock: &s, shapes: &shapes, models: &[], ignore: &[] };
         let b = build(&cx, CutKind::Profile, &json!({ "shape": "shape.1", "kerf": 1.0, "bottom": "through" }))?;
         // The wire runs half a kerf outside the 100 mm square, centred in the block.
         let cuts: Vec<&WirePos> = b.path.moves.iter().filter(|m| m.kind == MoveKind::Cut).map(|m| &m.to).collect();
@@ -1174,7 +1415,7 @@ mod tests {
     #[test]
     fn an_attached_profile_goes_over_the_top_and_the_release_under() -> EngineResult<()> {
         let (m, s, shapes) = job();
-        let cx = Context { machine: &m, stock: &s, shapes: &shapes, models: &[] };
+        let cx = Context { machine: &m, stock: &s, shapes: &shapes, models: &[], ignore: &[] };
         let b = build(
             &cx,
             CutKind::Profile,
@@ -1201,7 +1442,7 @@ mod tests {
     #[test]
     fn alternating_passes_start_where_the_last_one_finished() -> EngineResult<()> {
         let (m, s, shapes) = job();
-        let cx = Context { machine: &m, stock: &s, shapes: &shapes, models: &[] };
+        let cx = Context { machine: &m, stock: &s, shapes: &shapes, models: &[], ignore: &[] };
         let p = |alt: bool| json!({ "shape": "shape.1", "copies": 4, "step": 45.0, "alternate": alt });
         let both = build(&cx, CutKind::Profile, &p(true))?;
         let one = build(&cx, CutKind::Profile, &p(false))?;
@@ -1223,7 +1464,7 @@ mod tests {
     #[test]
     fn indexed_and_two_view_cuts_turn_the_table_clear_of_the_foam() -> EngineResult<()> {
         let (m, s, shapes) = job();
-        let cx = Context { machine: &m, stock: &s, shapes: &shapes, models: &[] };
+        let cx = Context { machine: &m, stock: &s, shapes: &shapes, models: &[], ignore: &[] };
         for (kind, p) in [
             (CutKind::Profile, json!({ "shape": "shape.1", "copies": 4 })),
             (CutKind::TwoView, json!({ "front": "shape.1", "side": "shape.2" })),
@@ -1248,7 +1489,7 @@ mod tests {
     #[test]
     fn lathe_passes_follow_the_half_profile() -> EngineResult<()> {
         let (m, s, shapes) = job();
-        let cx = Context { machine: &m, stock: &s, shapes: &shapes, models: &[] };
+        let cx = Context { machine: &m, stock: &s, shapes: &shapes, models: &[], ignore: &[] };
         let b = build(&cx, CutKind::Lathe, &json!({ "shape": "shape.2", "step": 30, "compensate": false }))?;
         assert_eq!(b.keeps.len(), 12);
         let r = b.path.moves.iter().filter(|m| m.kind == MoveKind::Cut).map(|m| m.to.u).fold(0.0, f64::max);
@@ -1259,7 +1500,7 @@ mod tests {
     #[test]
     fn slabs_step_by_thickness_and_kerf() -> EngineResult<()> {
         let (m, s, shapes) = job();
-        let cx = Context { machine: &m, stock: &s, shapes: &shapes, models: &[] };
+        let cx = Context { machine: &m, stock: &s, shapes: &shapes, models: &[], ignore: &[] };
         let b = build(&cx, CutKind::Slab, &json!({ "thickness": 50.0, "kerf": 1.0, "skim": 5.0 }))?;
         let hs: Vec<f64> = b.path.moves.iter().filter(|m| m.kind == MoveKind::Cut).map(|m| m.to.h).collect();
         assert!((hs[0] - 295.0).abs() < 1e-9);
@@ -1271,7 +1512,7 @@ mod tests {
     #[test]
     fn hostile_parameters_are_errors() {
         let (m, s, shapes) = job();
-        let cx = Context { machine: &m, stock: &s, shapes: &shapes, models: &[] };
+        let cx = Context { machine: &m, stock: &s, shapes: &shapes, models: &[], ignore: &[] };
         for p in [
             json!({}),
             json!({ "shape": "nope" }),
