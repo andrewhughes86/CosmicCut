@@ -145,12 +145,20 @@ level straight line, so it can follow any face whose level slices are straight l
 - helical ramps.
 
 1. Import the model, then choose **Swarf** in the cuts gallery.
-2. Click faces in the viewport. A click takes the whole surface the wire can follow from that
+2. Click faces in the viewport, on any model (one cut can take faces from several). A click takes the whole surface the wire can follow from that
    face, even if the model splits it into many small faces. **Alt-click** takes a single face,
    and clicking a selected face again removes it. Esc or right-click ends face selection.
 3. Faces that line up are cut in one pass; the others get a pass each. A pass comes straight
    down onto the top of its faces from above the foam, follows them down with the table turning,
-   and leaves level through the waste at the bottom.
+   and leaves level through the waste at the bottom. If another part is in the way there, the
+   wire backs up its own kerf and leaves above the foam instead.
+4. Level faces (a top, a ledge, a bottom) are swept: the wire comes in level from outside the
+   foam to the far edge of the face and goes back out, from whichever side and table angle is
+   shortest and clear. They are cut last, so a part's bottom is cut free at the end. Turn the
+   view to look from below and the turntable goes see-through, so the bottom can be picked.
+
+Every pass is checked against the part itself and the other models, apart from models listed
+as already off the table, and the cut fails if the wire would cut into any of them.
 
 **Height step** sets how far apart the wire positions are down the faces. **Straightness
 tolerance** sets how far a face's slices may be off a straight line before the cut is refused.
@@ -208,8 +216,8 @@ cuts, a DXF arch and an SVG chess-pawn half profile.
 - Pushing a version tag builds the Windows, macOS and Linux packages and publishes a release
   (`.github/workflows/release.yml`; the packaging files are in `packaging/`):
 
-      git tag v0.3.0
-      git push origin v0.3.0
+      git tag v0.4.0
+      git push origin v0.4.0
 
   For a new version, first bump `version` in the root `Cargo.toml` and add its section to
   `CHANGELOG.md`; the release notes start with that section.

@@ -30,7 +30,7 @@ impl Widths {
 }
 
 /// Parameters the panel carries without showing.
-const HIDDEN: &[&str] = &["id", "name", "model", "models", "faces", "ignore", "skip"];
+const HIDDEN: &[&str] = &["id", "name", "model", "models", "faces", "parts", "ignore", "skip"];
 
 /// The card a parameter shows in.
 fn section(name: &str) -> &'static str {
@@ -198,11 +198,7 @@ impl CutPanel {
                 }
                 CutKind::Swarf => {
                     values.insert("height_step".into(), json!(2.0));
-                    let model = session.selected_model().or(session.job.models.first()).map(|m| m.id.clone());
-                    if let Some(m) = model {
-                        values.insert("model".into(), json!(m));
-                    }
-                    values.insert("faces".into(), json!([]));
+                    values.insert("parts".into(), json!([]));
                 }
                 CutKind::Model => {
                     values.insert("divisions".into(), json!(8));
@@ -295,38 +291,63 @@ impl CutPanel {
 
     /// A new swarf cut starts with its faces being picked.
     fn picking_faces_if_none(mut self) -> Self {
-        self.picking_faces = self.kind == CutKind::Swarf && self.faces().is_empty();
+        self.picking_faces = self.kind == CutKind::Swarf && self.parts().iter().all(|(_, f)| f.is_empty());
         self
     }
 
-    /// The faces a swarf cut follows, by number.
-    pub fn faces(&self) -> Vec<usize> {
-        self.hidden
-            .get("faces")
-            .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_u64).filter_map(|f| usize::try_from(f).ok()).collect())
-            .unwrap_or_default()
-    }
-
-    /// The model a swarf cut's faces are on, its faces, and whether more are being picked.
-    pub fn face_pick(&self) -> Option<(String, Vec<usize>, bool)> {
-        if self.kind != CutKind::Swarf {
-            return None;
+    /// The faces a swarf cut follows, by model: its `parts`, or (an older cut) its `model` and
+    /// `faces`.
+    pub fn parts(&self) -> Vec<(String, Vec<usize>)> {
+        let numbers = |v: Option<&Value>| -> Vec<usize> {
+            v.and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_u64).filter_map(|f| usize::try_from(f).ok()).collect())
+                .unwrap_or_default()
+        };
+        if let Some(list) = self.hidden.get("parts").and_then(Value::as_array) {
+            return list
+                .iter()
+                .filter_map(|part| Some((part.get("model")?.as_str()?.to_owned(), numbers(part.get("faces")))))
+                .collect();
         }
-        let model = self.hidden.get("model").and_then(Value::as_str)?.to_owned();
-        Some((model, self.faces(), self.picking_faces))
+        match self.hidden.get("model").and_then(Value::as_str) {
+            Some(m) => vec![(m.to_owned(), numbers(self.hidden.get("faces")))],
+            None => Vec::new(),
+        }
     }
 
-    /// Faces were clicked (the clicked one first): in if it was out, all out if it was in.
-    pub fn toggle_faces(&mut self, clicked: &[usize]) {
-        let mut faces = self.faces();
+    fn set_parts(&mut self, parts: Vec<(String, Vec<usize>)>) {
+        let list: Vec<Value> =
+            parts.into_iter().filter(|(_, f)| !f.is_empty()).map(|(m, f)| json!({ "model": m, "faces": f })).collect();
+        self.hidden.remove("model");
+        self.hidden.remove("faces");
+        self.hidden.insert("parts".into(), Value::Array(list));
+    }
+
+    /// A swarf cut's faces by model, and whether more are being picked.
+    pub fn face_pick(&self) -> Option<crate::viewport::FacePick> {
+        (self.kind == CutKind::Swarf).then(|| (self.parts(), self.picking_faces))
+    }
+
+    /// Faces of `model` were clicked (the clicked one first): in if it was out, all out if it was in.
+    pub fn toggle_faces(&mut self, model: &str, clicked: &[usize]) {
+        let mut parts = self.parts();
         let Some(first) = clicked.first() else { return };
-        if faces.contains(first) {
-            faces.retain(|f| !clicked.contains(f));
-        } else {
-            faces.extend(clicked.iter().filter(|f| !faces.contains(f)).copied().collect::<Vec<_>>());
+        let i = match parts.iter().position(|(m, _)| m == model) {
+            Some(i) => i,
+            None => {
+                parts.push((model.to_owned(), Vec::new()));
+                parts.len() - 1
+            }
+        };
+        if let Some((_, faces)) = parts.get_mut(i) {
+            if faces.contains(first) {
+                faces.retain(|f| !clicked.contains(f));
+            } else {
+                let more: Vec<usize> = clicked.iter().filter(|f| !faces.contains(f)).copied().collect();
+                faces.extend(more);
+            }
         }
-        self.hidden.insert("faces".into(), json!(faces));
+        self.set_parts(parts);
     }
 
     pub fn fail(&mut self, message: String) {
@@ -597,7 +618,7 @@ impl CutPanel {
                 (_, Some(Value::String(m))) => vec![m.clone()],
                 _ => session.job.models.iter().map(|m| m.id.clone()).collect(),
             },
-            CutKind::Swarf => self.hidden.get("model").and_then(Value::as_str).map(str::to_owned).into_iter().collect(),
+            CutKind::Swarf => self.parts().into_iter().map(|(m, _)| m).collect(),
             _ => Vec::new(),
         };
         let others: Vec<_> = session.job.models.iter().filter(|m| !own.contains(&m.id)).collect();
@@ -736,12 +757,15 @@ impl CutPanel {
 
     /// Pick the faces in the viewport, and how many there are.
     fn face_buttons(&mut self, ui: &mut Ui, tokens: &Tokens) {
-        let count = self.faces().len();
+        let parts = self.parts();
+        let count: usize = parts.iter().map(|(_, f)| f.len()).sum();
+        let models = parts.iter().filter(|(_, f)| !f.is_empty()).count();
         ui.label(
-            RichText::new(match count {
-                0 => "No faces selected".to_owned(),
-                1 => "1 face selected".to_owned(),
-                n => format!("{n} faces selected"),
+            RichText::new(match (count, models) {
+                (0, _) => "No faces selected".to_owned(),
+                (1, _) => "1 face selected".to_owned(),
+                (n, 1) => format!("{n} faces selected"),
+                (n, m) => format!("{n} faces selected on {m} models"),
             })
             .color(tokens.accent),
         );
@@ -752,14 +776,14 @@ impl CutPanel {
                 .fill(if on { tokens.accent } else { tokens.raised_bg });
             if ui
                 .add(button)
-                .on_hover_text("Click faces of the model to add them, click again to take them away; Esc stops")
+                .on_hover_text("Click faces of any model to add them, click again to take them away; Esc stops")
                 .clicked()
             {
                 self.picking_faces = !on;
             }
             if ui.add_enabled(count > 0, egui::Button::new("Clear")).on_hover_text("Take all the faces away").clicked()
             {
-                self.hidden.insert("faces".into(), json!([]));
+                self.set_parts(Vec::new());
             }
         });
         ui.add_space(4.0);

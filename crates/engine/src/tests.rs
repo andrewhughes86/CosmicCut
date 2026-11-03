@@ -905,3 +905,92 @@ fn a_profile_can_leave_lines_out_and_start_from_the_end_chosen() {
     assert!(CosmicCut_geom::region::contains(&keep, glam::DVec2::new(-230.0, 50.0)));
     assert!(!CosmicCut_geom::region::contains(&keep, glam::DVec2::new(0.0, 50.0)));
 }
+
+#[test]
+fn swarf_backs_out_rather_than_cut_a_neighbour_and_sweeps_level_faces() {
+    use CosmicCut_geom::faces::FaceKind;
+    let dir = std::env::temp_dir().join(format!("cosmiccut-swarf-row-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("block.stl").to_string_lossy().into_owned();
+    let _ = std::fs::write(&path, box_stl([60.0, 60.0, 100.0]));
+    let mut s = Session::new();
+    run(&mut s, "stock.block", json!({ "width": 600.0, "depth": 200.0, "height": 200.0 }));
+    let id = |v: Value| v["id"].as_str().unwrap_or_default().to_owned();
+    // Three blocks in a row; the left one stands 20 mm up, on foam.
+    let left = id(run(&mut s, "model.import", json!({ "path": path, "units": "mm", "name": "Left" })));
+    run(&mut s, "model.move", json!({ "id": left, "x": -200.0, "z": 20.0 }));
+    let centre = id(run(&mut s, "model.import", json!({ "path": path, "units": "mm", "name": "Centre" })));
+    let right = id(run(&mut s, "model.import", json!({ "path": path, "units": "mm", "name": "Right" })));
+    run(&mut s, "model.move", json!({ "id": right, "x": 200.0 }));
+    // The left block's faces by the way they face.
+    let face = |dir: glam::Vec3| {
+        s.job.model(&left).and_then(|m| {
+            m.faces.faces.iter().position(|f| match f.kind {
+                FaceKind::Plane { normal, .. } => normal.dot(dir) > 0.99,
+                _ => false,
+            })
+        })
+    };
+    let (inner, bottom) = (face(glam::Vec3::X).unwrap_or(0), face(glam::Vec3::NEG_Z).unwrap_or(0));
+    // The inner face: out level through the waste would run into the centre block, so the wire
+    // backs up its own kerf and leaves above the foam.
+    let cut = s.execute("cut.swarf", &json!({ "model": left, "faces": [inner] }));
+    assert!(cut.is_ok(), "{cut:?}");
+    let c = s.job.cuts.last().map(|c| c.path.clone()).unwrap_or_default();
+    let centre_edge = -30.0 - 1.0;
+    assert!(c.moves.iter().all(|m| m.to.u < centre_edge || m.to.h > 200.0), "the wire stays clear of the centre");
+    assert!(
+        c.moves.iter().any(|m| m.kind == crate::wire::MoveKind::Lead && m.to.h > 200.0),
+        "it backs out over the top"
+    );
+    // The bottom, a level face: swept in from outside, under the block, and back out.
+    run(&mut s, "cut.swarf", json!({ "model": left, "faces": [bottom] }));
+    let c = s.job.cuts.last().map(|c| c.path.clone()).unwrap_or_default();
+    let level: Vec<_> = c.moves.iter().filter(|m| m.kind == crate::wire::MoveKind::Lead).collect();
+    assert!(level.iter().all(|m| (m.to.h - (20.0 - s.job.machine.kerf / 2.0)).abs() < 1e-6), "{level:?}");
+    // The centre block's bottom is on the table: nothing to cut under it, and it says so.
+    let on_table = s.job.model(&centre).and_then(|m| {
+        m.faces.faces.iter().position(|f| matches!(f.kind, FaceKind::Plane { normal, .. } if normal.z < -0.99))
+    });
+    run(&mut s, "cut.swarf", json!({ "model": centre, "faces": [on_table], "ignore": [left] }));
+    let w = s.job.cuts.last().map(|c| c.warnings.clone()).unwrap_or_default();
+    assert!(w.iter().any(|w| w.contains("no foam under it")), "{w:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn one_swarf_cut_takes_faces_from_several_models() {
+    use CosmicCut_geom::faces::FaceKind;
+    let dir = std::env::temp_dir().join(format!("cosmiccut-swarf-two-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("block.stl").to_string_lossy().into_owned();
+    let _ = std::fs::write(&path, box_stl([60.0, 60.0, 100.0]));
+    let mut s = Session::new();
+    run(&mut s, "stock.block", json!({ "width": 500.0, "depth": 200.0, "height": 200.0 }));
+    let id = |v: Value| v["id"].as_str().unwrap_or_default().to_owned();
+    let a = id(run(&mut s, "model.import", json!({ "path": path, "units": "mm", "name": "A" })));
+    run(&mut s, "model.move", json!({ "id": a, "x": -120.0 }));
+    let b = id(run(&mut s, "model.import", json!({ "path": path, "units": "mm", "name": "B" })));
+    run(&mut s, "model.move", json!({ "id": b, "x": 120.0 }));
+    let face = |m: &str, dir: glam::Vec3| {
+        s.job.model(m).and_then(|m| {
+            m.faces
+                .faces
+                .iter()
+                .position(|f| matches!(f.kind, FaceKind::Plane { normal, .. } if normal.dot(dir) > 0.99))
+        })
+    };
+    let (a_out, a_in) = (face(&a, -glam::Vec3::X), face(&a, glam::Vec3::X));
+    let (b_out, b_in) = (face(&b, glam::Vec3::X), face(&b, -glam::Vec3::X));
+    // The outside face of each block, in one cut.
+    let parts = json!([{ "model": a, "faces": [a_out] }, { "model": b, "faces": [b_out] }]);
+    run(&mut s, "cut.swarf", json!({ "parts": parts }));
+    let cut = s.job.cuts.last();
+    assert!(cut.is_some_and(|c| c.error.is_none() && c.keeps.len() == 2), "{:?}", cut.map(|c| &c.error));
+    // A face of A that would take the wire through B going out level backs out instead; the cut
+    // is still made.
+    let inner = json!([{ "model": a, "faces": [a_in] }, { "model": b, "faces": [b_in] }]);
+    let e = s.execute("cut.swarf", &json!({ "parts": inner }));
+    assert!(e.is_ok(), "{e:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

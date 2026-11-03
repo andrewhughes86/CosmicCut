@@ -9,11 +9,14 @@
 //! A pass comes straight down onto the top of its faces from above the foam, follows them down,
 //! and leaves level out through the waste at the bottom.
 
+use std::collections::HashSet;
+
 use glam::{DVec2, DVec3};
 use serde_json::Value;
 
 use crate::cut::{Built, Context, Keep, Sweep};
 use crate::error::{EngineError, EngineResult};
+use crate::interference::Obstacles;
 use crate::model::Model;
 use crate::params;
 use crate::wire::{MoveKind, WirePos, on_wire, u_axis};
@@ -285,39 +288,6 @@ fn pass(tris: &[Tri], floor: f64, step: f64, tol: f64, kerf: f64) -> EngineResul
     Ok((Pass { stations, waste }, below))
 }
 
-/// The wire's line at height `h` on a pass: `(face u, b)`, held at the top line above it.
-fn line_at(stations: &[Station], h: f64) -> Option<(f64, f64)> {
-    // Stations run from the top down.
-    let k = stations.partition_point(|s| s.wire.h > h);
-    match (k.checked_sub(1).and_then(|i| stations.get(i)), stations.get(k)) {
-        (Some(a), Some(b)) => {
-            let t = if (a.wire.h - b.wire.h).abs() > 1.0e-12 { (a.wire.h - h) / (a.wire.h - b.wire.h) } else { 0.0 };
-            Some((a.face_u + (b.face_u - a.face_u) * t, a.wire.b + (b.wire.b - a.wire.b) * t))
-        }
-        (None, Some(s)) | (Some(s), None) => Some((s.face_u, s.wire.b)),
-        (None, None) => None,
-    }
-}
-
-/// How deep the wire would cut into the rest of the model on this pass, and where, if it would.
-fn gouge(all: &[Tri], p: &Pass, step: f64, tol: f64, top: f64) -> Option<(f64, f64)> {
-    let lowest = p.stations.last()?.wire.h;
-    let n = (((top - lowest) / step).ceil() as usize).clamp(1, MAX_SAMPLES);
-    let mut worst: Option<(f64, f64)> = None;
-    for k in 0..=n {
-        let h = lowest + (top - lowest) * k as f64 / n as f64;
-        let Some((u, b)) = line_at(&p.stations, h) else { continue };
-        let a = u_axis(b);
-        for q in slice_points(all, h) {
-            let into = (q.x * a.x + q.y * a.y - u) * p.waste;
-            if into > tol * 2.0 + 1.0e-3 && worst.is_none_or(|(d, _)| into > d) {
-                worst = Some((into, h));
-            }
-        }
-    }
-    worst
-}
-
 /// How far the faces' slices may be off a straight line unless the cut says, mm.
 pub const DEFAULT_TOLERANCE: f64 = 0.25;
 
@@ -328,6 +298,28 @@ pub fn surface(model: &Model, face: usize, tol: f64) -> Vec<usize> {
     let neighbours = model.face_neighbours();
     let mut picked = vec![face];
     let mut tris: Vec<Tri> = face_triangles(model, &[face]).concat();
+    // A level face: the level faces joined to it at its height, facing the same way.
+    let flat = |t: &[Tri]| {
+        let (lo, hi) = range(t);
+        (hi - lo <= (tol * 0.5).max(2.0 * INSET)).then(|| (lo, t.iter().map(|x| x.normal().z).sum::<f64>() >= 0.0))
+    };
+    if let Some((z, up)) = flat(&tris) {
+        let mut queue = vec![face];
+        let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::from([face]);
+        while let Some(f) = queue.pop() {
+            for &g in neighbours.get(f).map_or(&[][..], Vec::as_slice) {
+                if picked.len() < MAX_FACES
+                    && seen.insert(g)
+                    && flat(&face_triangles(model, &[g]).concat())
+                        .is_some_and(|(zg, ug)| (zg - z).abs() <= tol && ug == up)
+                {
+                    picked.push(g);
+                    queue.push(g);
+                }
+            }
+        }
+        return picked;
+    }
     let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::from([face]);
     let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::from([face]);
     while let Some(f) = queue.pop_front() {
@@ -337,8 +329,8 @@ pub fn surface(model: &Model, face: usize, tol: f64) -> Vec<usize> {
             }
             let next = face_triangles(model, &[g]).concat();
             let (lo, hi) = range(&next);
-            // A level face never lines up: the wire cannot follow it.
-            if hi - lo > 2.0 * INSET && line_up(&tris, &next, tol) {
+            // A level face is swept on its own, not followed down with these.
+            if hi - lo > (tol * 0.5).max(2.0 * INSET) && line_up(&tris, &next, tol) {
                 picked.push(g);
                 tris.extend(next);
                 queue.push_back(g);
@@ -389,17 +381,25 @@ pub(crate) fn model_of<'a>(cx: &Context<'a>, p: &Value) -> EngineResult<Option<&
     })
 }
 
-pub(crate) fn swarf(cx: &Context<'_>, p: &Value) -> EngineResult<Built> {
-    let c = crate::cut::common(cx, p)?;
-    let model = model_of(cx, p)?.ok_or_else(|| EngineError::InvalidParams("import a model first".into()))?;
-    let faces = faces_param(p, model)?;
-    let step = params::opt_f64(p, "height_step", 0.05, 1000.0)?.unwrap_or(2.0);
-    let tol = params::opt_f64(p, "tolerance", 0.001, 50.0)?.unwrap_or(DEFAULT_TOLERANCE);
-    let kerf = if c.compensate { c.kerf } else { 0.0 };
-    let by_face = face_triangles(model, &faces);
+/// A model's faces split into passes that follow faces down (those that line up together, as
+/// face numbers and triangles) and sweeps across level faces (height, facing up 1 or down -1,
+/// faces, triangles).
+#[allow(clippy::type_complexity)]
+fn split(
+    model: &Model,
+    faces: &[usize],
+    tol: f64,
+) -> (Vec<(Vec<usize>, Vec<Tri>)>, Vec<(f64, f64, Vec<usize>, Vec<Tri>)>) {
+    let by_face = face_triangles(model, faces);
 
-    // Faces that line up are one pass.
-    let mut group: Vec<usize> = (0..by_face.len()).collect();
+    // Level faces are swept across; the rest are followed down, those that line up in one pass.
+    let level = |tris: &[Tri]| {
+        let (lo, hi) = range(tris);
+        hi - lo <= (tol * 0.5).max(2.0 * INSET)
+    };
+    let (flat, rising): (Vec<usize>, Vec<usize>) =
+        (0..by_face.len()).partition(|&i| by_face.get(i).is_some_and(|t| level(t)));
+    let mut group: Vec<usize> = (0..rising.len()).collect();
     fn root(g: &[usize], mut i: usize) -> usize {
         while let Some(&up) = g.get(i) {
             if up == i {
@@ -409,82 +409,190 @@ pub(crate) fn swarf(cx: &Context<'_>, p: &Value) -> EngineResult<Built> {
         }
         i
     }
-    for i in 0..by_face.len() {
-        for j in i + 1..by_face.len() {
-            let (ri, rj) = (root(&group, i), root(&group, j));
-            if ri != rj
-                && let (Some(a), Some(b)) = (by_face.get(i), by_face.get(j))
-                && line_up(a, b, tol)
-                && let Some(slot) = group.get_mut(rj)
+    for a in 0..rising.len() {
+        for b in a + 1..rising.len() {
+            let (ra, rb) = (root(&group, a), root(&group, b));
+            let tris = |k: usize| rising.get(k).and_then(|&f| by_face.get(f));
+            if ra != rb
+                && let (Some(ta), Some(tb)) = (tris(a), tris(b))
+                && line_up(ta, tb, tol)
+                && let Some(slot) = group.get_mut(rb)
             {
-                *slot = ri;
+                *slot = ra;
             }
         }
     }
-    let mut groups: Vec<Vec<Tri>> = Vec::new();
+    // (face numbers, their triangles) for each pass.
+    let mut groups: Vec<(Vec<usize>, Vec<Tri>)> = Vec::new();
     let mut roots: Vec<usize> = Vec::new();
-    for (i, tris) in by_face.iter().enumerate() {
-        let r = root(&group, i);
+    for (k, &f) in rising.iter().enumerate() {
+        let (Some(&face), Some(tris)) = (faces.get(f), by_face.get(f)) else { continue };
+        let r = root(&group, k);
         match roots.iter().position(|x| *x == r) {
-            Some(k) => {
-                if let Some(g) = groups.get_mut(k) {
-                    g.extend_from_slice(tris);
+            Some(n) => {
+                if let Some((fs, ts)) = groups.get_mut(n) {
+                    fs.push(face);
+                    ts.extend_from_slice(tris);
                 }
             }
             None => {
                 roots.push(r);
-                groups.push(tris.clone());
+                groups.push((vec![face], tris.clone()));
             }
         }
+    }
+    // Level faces at one height facing one way are one sweep: (height, up 1 or down -1, faces,
+    // triangles).
+    let mut sweeps: Vec<(f64, f64, Vec<usize>, Vec<Tri>)> = Vec::new();
+    for &f in &flat {
+        let (Some(&face), Some(tris)) = (faces.get(f), by_face.get(f)) else { continue };
+        let z = range(tris).0;
+        let up = if tris.iter().map(|t| t.normal().z).sum::<f64>() >= 0.0 { 1.0 } else { -1.0 };
+        match sweeps.iter_mut().find(|(h, u, _, _)| (h - z).abs() <= tol && *u == up) {
+            Some((_, _, fs, ts)) => {
+                fs.push(face);
+                ts.extend_from_slice(tris);
+            }
+            None => sweeps.push((z, up, vec![face], tris.clone())),
+        }
+    }
+
+    (groups, sweeps)
+}
+
+/// A sweep across level faces: which part, the height, facing up 1 or down -1, the faces and
+/// their triangles.
+type LevelSweep = (usize, f64, f64, Vec<usize>, Vec<Tri>);
+
+/// Most models one swarf cut takes faces from.
+pub const MAX_PARTS: usize = 64;
+
+/// The models a swarf cut follows faces of, with those faces: its `parts` (each a model and its
+/// faces), else the `model` (or the first) with `faces`.
+pub(crate) fn parts_of<'a>(cx: &Context<'a>, p: &Value) -> EngineResult<Vec<(&'a Model, Vec<usize>)>> {
+    if let Some(list) = p.get("parts").and_then(Value::as_array).filter(|a| !a.is_empty()) {
+        if list.len() > MAX_PARTS {
+            return Err(EngineError::InvalidParams(format!("a swarf cut takes faces from at most {MAX_PARTS} models")));
+        }
+        let mut out: Vec<(&Model, Vec<usize>)> = Vec::new();
+        for part in list {
+            let id = part
+                .get("model")
+                .and_then(Value::as_str)
+                .ok_or_else(|| EngineError::InvalidParams("each of `parts` names its `model`".into()))?;
+            let m = cx
+                .models
+                .iter()
+                .find(|m| m.id == id || m.name == id)
+                .ok_or_else(|| EngineError::InvalidParams(format!("there is no model `{id}`")))?;
+            let faces = faces_param(part, m)?;
+            match out.iter_mut().find(|(o, _)| o.id == m.id) {
+                Some((_, fs)) => {
+                    let more: Vec<usize> = faces.into_iter().filter(|f| !fs.contains(f)).collect();
+                    fs.extend(more);
+                }
+                None => out.push((m, faces)),
+            }
+        }
+        return Ok(out);
+    }
+    let model = model_of(cx, p)?.ok_or_else(|| EngineError::InvalidParams("import a model first".into()))?;
+    Ok(vec![(model, faces_param(p, model)?)])
+}
+
+pub(crate) fn swarf(cx: &Context<'_>, p: &Value) -> EngineResult<Built> {
+    let c = crate::cut::common(cx, p)?;
+    let parts = parts_of(cx, p)?;
+    let step = params::opt_f64(p, "height_step", 0.05, 1000.0)?.unwrap_or(2.0);
+    let tol = params::opt_f64(p, "tolerance", 0.001, 50.0)?.unwrap_or(DEFAULT_TOLERANCE);
+    let kerf = if c.compensate { c.kerf } else { 0.0 };
+    // Each model's faces: the passes that follow them down and the sweeps across level ones.
+    let mut groups: Vec<(usize, Vec<usize>, Vec<Tri>)> = Vec::new();
+    let mut sweeps: Vec<LevelSweep> = Vec::new();
+    for (k, (model, faces)) in parts.iter().enumerate() {
+        let (g, sw) = split(model, faces, tol);
+        groups.extend(g.into_iter().map(|(fs, t)| (k, fs, t)));
+        sweeps.extend(sw.into_iter().map(|(z, up, fs, t)| (k, z, up, fs, t)));
     }
 
     let floor = cx.machine.wire_y0.max(cx.stock.bottom());
     let mut out =
         Built { path: crate::wire::WirePath::new(crate::cut::park(cx.machine, cx.stock, 0.0)), ..Built::default() };
-    let mut passes: Vec<Pass> = Vec::new();
+    let mut passes: Vec<(usize, Vec<usize>, Pass)> = Vec::new();
     let mut sunk = 0.0_f64;
-    for g in &groups {
-        let (p, below) = pass(g, floor, step, tol, kerf)?;
+    for (k, fs, tris) in &groups {
+        let (p, below) = pass(tris, floor, step, tol, kerf)?;
         sunk = sunk.max(below);
-        passes.push(p);
+        passes.push((*k, fs.clone(), p));
     }
     // The table turns one way through the passes.
     passes.sort_by(|a, b| {
         let first = |p: &Pass| p.stations.first().map_or(0.0, |s| s.wire.b);
-        first(a).total_cmp(&first(b))
+        first(&a.2).total_cmp(&first(&b.2))
     });
-    let angles: Vec<f64> = passes.iter().flat_map(|p| p.stations.iter().map(|s| s.wire.b)).collect();
-    crate::cut::needs_b(cx, &angles)?;
+    // Level faces last, from the top down: a part's bottom is cut free at the very end.
+    sweeps.sort_by(|a, b| b.1.total_cmp(&a.1));
     if sunk > c.kerf + 1.0e-6 {
         out.warnings.push(format!(
             "the bottom {sunk:.1} mm of the faces is lower than the wire reaches; the wire stops level there"
         ));
     }
 
-    // The rest of the model, to check the wire stays out of it.
-    let all: Vec<Tri> = model
-        .mesh
-        .triangles()
+    // What the wire must stay out of: every other model, the other parts of this cut too (unless
+    // the cut or its operation says they are off the table), and the part itself, less the faces
+    // being cut.
+    let ignored: Vec<&str> = p
+        .get("ignore")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let others: Vec<Obstacles<'_>> = parts
         .iter()
-        .map(|idx| {
-            let [a, b, c] = model.mesh.corners(*idx);
-            Tri::new([a.as_dvec3(), b.as_dvec3(), c.as_dvec3()])
+        .map(|(model, _)| {
+            let list: Vec<&Model> = cx
+                .models
+                .iter()
+                .filter(|m| m.id != model.id && !ignored.contains(&m.id.as_str()) && !cx.ignore.contains(&m.id))
+                .collect();
+            Obstacles::new(&list)
         })
         .collect();
-    let model_top = f64::from(model.mesh.bounds().max.z);
+    let own = |k: usize, fs: &[usize]| match parts.get(k) {
+        Some((model, _)) => {
+            let except: HashSet<usize> = fs.iter().flat_map(|&f| model.faces.triangles_of(f)).collect();
+            Obstacles::new(&[]).with_part(model, &except)
+        }
+        None => Obstacles::new(&[]),
+    };
+    let (clear_other, clear_own) = (c.kerf / 2.0, c.kerf / 4.0);
+    let none = Obstacles::new(&[]);
+    let blocked = |k: usize, own: &Obstacles<'_>, from: WirePos, to: WirePos| {
+        let others = others.get(k).unwrap_or(&none);
+        own.along(from, to, clear_own)
+            .map(|(_, at)| ("the part itself".to_owned(), at))
+            .or_else(|| others.along(from, to, clear_other).map(|(name, at)| (name.to_owned(), at)))
+    };
+
     let reach = cx.stock.reach();
     let safe = cx.stock.top() + c.clearance;
-    let mut worst: Option<(f64, f64)> = None;
-    for p in &passes {
+    let mut angles: Vec<f64> = Vec::new();
+    for (k, fs, p) in &passes {
+        let k = *k;
         let (Some(first), Some(last)) = (p.stations.first(), p.stations.last()) else { continue };
-        if let Some((d, h)) = gouge(&all, p, step, tol, model_top)
-            && worst.is_none_or(|(w, _)| d > w)
-        {
-            worst = Some((d, h));
-        }
-        // Down from above the foam onto the top of the faces, down them, out level through the
-        // waste at the bottom.
+        let own = own(k, fs);
+        // Down from above the foam onto the top of the faces, and down them.
         let above = WirePos::new(first.wire.u, safe, first.wire.b);
+        let mut down = vec![above, first.wire];
+        down.extend(p.stations.iter().skip(1).map(|s| s.wire));
+        if let Some((what, at)) = down.windows(2).find_map(|w| match w {
+            [a, b] => blocked(k, &own, *a, *b),
+            _ => None,
+        }) {
+            return Err(EngineError::InvalidParams(format!(
+                "following the faces, the wire would cut into {what} (the table at B {:.1}°, the wire {:.1} mm up)",
+                at.b, at.h
+            )));
+        }
         crate::cut::travel(cx, &c, &mut out.path, above, "top");
         out.path.push(MoveKind::Lead, first.wire, c.feed);
         let mut at = first.wire;
@@ -493,23 +601,82 @@ pub(crate) fn swarf(cx: &Context<'_>, p: &Value) -> EngineResult<Built> {
             out.path.push(MoveKind::Cut, s.wire, feed);
             at = s.wire;
         }
+        angles.extend(p.stations.iter().map(|s| s.wire.b));
+        // Out level through the waste at the bottom, if nothing stands there; else back up the
+        // kerf it came down, which cuts nothing new.
         let clear = (reach + c.clearance).max(last.wire.u * p.waste + c.clearance);
-        out.path.push(MoveKind::Lead, WirePos::new(clear * p.waste, last.wire.h, last.wire.b), c.feed);
-        // Stations run down; the simulation looks lines up from the bottom.
+        let level_out = WirePos::new(clear * p.waste, last.wire.h, last.wire.b);
         let lines: Vec<WirePos> = p.stations.iter().rev().map(|s| WirePos::new(s.face_u, s.wire.h, s.wire.b)).collect();
-        out.keeps.push(Keep {
-            b: first.wire.b,
-            regions: Vec::new(),
-            outside: false,
-            at: out.path.moves.len(),
-            sweep: Some(Sweep { lines, waste: p.waste }),
-        });
+        let sweep = Some(Sweep { lines, waste: p.waste });
+        let keep = |at: usize| Keep { b: first.wire.b, regions: Vec::new(), outside: false, at, sweep: sweep.clone() };
+        if blocked(k, &own, last.wire, level_out).is_none() {
+            out.path.push(MoveKind::Lead, level_out, c.feed);
+            out.keeps.push(keep(out.path.moves.len()));
+        } else {
+            let mut back = last.wire;
+            for s in p.stations.iter().rev().skip(1) {
+                let feed = simultaneous_feed(&back, &s.wire, c.feed, reach);
+                out.path.push(MoveKind::Lead, s.wire, feed);
+                back = s.wire;
+            }
+            out.path.push(MoveKind::Lead, above, c.feed);
+            // Down to the table, the waste on the far side is free; else it stays joined below.
+            if last.wire.h <= floor + c.kerf {
+                out.keeps.push(keep(out.path.moves.len()));
+            }
+        }
     }
-    if let Some((d, h)) = worst {
-        out.warnings.push(format!(
-            "the wire would cut {d:.1} mm into the part {h:.1} mm up: other faces stand in its way along the wire"
-        ));
+    for (k, z, up, fs, tris) in &sweeps {
+        let k = *k;
+        // Level with the face, half a kerf off it on the waste side (above a top, below a bottom).
+        let h = z + up * kerf / 2.0;
+        if h < floor - 1.0e-6 {
+            // A face on the table (or lower than the wire reaches): no foam under it to cut.
+            out.warnings.push(format!(
+                "the level face {z:.1} mm up has no foam under it the wire can reach, so it is left as it is"
+            ));
+            continue;
+        }
+        let own = own(k, fs);
+        let pts: Vec<DVec3> = tris.iter().flat_map(|t| t.p).collect();
+        let now = out.path.end().b;
+        // In from outside the foam to the far edge of the face and back out: the table angle and
+        // side that make the shortest way in clear of the part and the other models.
+        let mut best: Option<(f64, WirePos, WirePos)> = None;
+        let mut stopped: Option<(String, WirePos)> = None;
+        for k in 0..24 {
+            let b = now + 15.0 * k as f64;
+            let a = u_axis(b);
+            let far = pts.iter().map(|q| q.x * a.x + q.y * a.y).fold(f64::NEG_INFINITY, f64::max);
+            let outside = WirePos::new(-(reach + c.clearance), h, b);
+            let end = WirePos::new(far, h, b);
+            if far.is_nan() || far <= outside.u {
+                continue;
+            }
+            match blocked(k, &own, outside, end) {
+                Some(hit) => stopped = stopped.or(Some(hit)),
+                None => {
+                    let length = far - outside.u + (b - now).abs() * 1.0e-3;
+                    if best.is_none_or(|(l, _, _)| length < l) {
+                        best = Some((length, outside, end));
+                    }
+                }
+            }
+        }
+        let Some((_, outside, end)) = best else {
+            let (what, at) = stopped.unwrap_or_else(|| ("the stock".to_owned(), WirePos::new(0.0, h, now)));
+            return Err(EngineError::InvalidParams(format!(
+                "there is no way in to the level face {z:.1} mm up from any side without cutting into {what} (for \
+                 example with the table at B {:.1}°)",
+                at.b
+            )));
+        };
+        crate::cut::travel(cx, &c, &mut out.path, outside, "left");
+        out.path.push(MoveKind::Lead, end, c.feed);
+        out.path.push(MoveKind::Lead, outside, c.feed);
+        angles.push(outside.b);
     }
+    crate::cut::needs_b(cx, &angles)?;
     crate::cut::finish(cx, &c, &mut out);
     crate::cut::check_fits(cx, &mut out);
     Ok(out)

@@ -252,7 +252,8 @@ pub fn build(cx: &Context<'_>, kind: CutKind, p: &Value) -> EngineResult<Built> 
     // The wire must not touch the models this cut is not making.
     let own: Vec<String> = match kind {
         CutKind::Model => cut_models(cx, p)?.iter().map(|m| m.id.clone()).collect(),
-        CutKind::Swarf => crate::swarf::model_of(cx, p)?.into_iter().map(|m| m.id.clone()).collect(),
+        // A swarf cut keeps its own parts' wire clear of each other itself.
+        CutKind::Swarf => crate::swarf::parts_of(cx, p)?.iter().map(|(m, _)| m.id.clone()).collect(),
         _ => Vec::new(),
     };
     let kerf = params::opt_f64(p, "kerf", 0.0, 50.0)?.unwrap_or(cx.machine.kerf);

@@ -217,7 +217,13 @@ pub const SWARF_PARAMS: &[Param] = &[
     ID,
     NAME,
     Param::optional("model", ParamKind::Str, "The model (default the imported one)"),
-    Param::required(
+    Param::optional(
+        "parts",
+        ParamKind::Objects { max: crate::swarf::MAX_PARTS },
+        "Faces from any models: a list of {\"model\": id, \"faces\": [face numbers]}. Each model's passes keep \
+         clear of the others",
+    ),
+    Param::optional(
         "faces",
         ParamKind::IntList { max: crate::swarf::MAX_FACES },
         "The model's faces for the wire to follow (face numbers). Faces that line up are cut in one pass, the \

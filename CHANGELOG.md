@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0
+
+- **A swarf cut takes faces from any models,** not only the selected one: click faces on any
+  model in the viewport. Each model's passes keep clear of the others in the cut and of every
+  other model, unless they are listed as off the table.
+- **Swarf passes leave by the way that is clear.** At the bottom of its faces the wire goes out
+  level through the waste when nothing is in the way. If a part is in the way, it backs up the
+  kerf it came down (cutting nothing new) and leaves above the foam. For example, an end part's
+  inner face can be cut without the wire running into the parts in the middle.
+- **Swarf cuts level faces too.** The wire sits level at the face, half a kerf off on the waste
+  side, and sweeps in from outside the foam to the far edge of the face and back out. It uses
+  the table angle and side with the shortest way in that keeps clear of everything else. Level
+  faces are cut last, from the top down, so a part's bottom is cut free at the very end. A face
+  on the table, with no foam under it, is left alone with a note.
+- Every swarf pass must keep out of the part itself as well as other models (unless they are
+  listed as off the table). A pass that would cut into the part is now an error, not a warning.
+- **Seen from below, the turntable is see-through**, so a part's bottom face can be seen and
+  picked.
+
 ## 0.3.0
 
 - **Several models in one cut.** A From model cut takes any of the job's models (all of them by

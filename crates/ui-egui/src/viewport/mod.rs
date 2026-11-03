@@ -27,7 +27,9 @@ use crate::ui_kit::{Container, Surface};
 
 /// What the uploaded scene was built from: theme, job revision, display, units, selection,
 /// simulating, preview, paths hidden.
-type SceneKey = (Theme, u64, Display, bool, Option<String>, bool, usize, bool);
+/// What the uploaded scene was built from; the last, whether the view looks up from under the
+/// table (the turntable is then see-through, so faces underneath can be picked).
+type SceneKey = (Theme, u64, Display, bool, Option<String>, bool, usize, bool, bool);
 
 pub struct Viewport {
     /// The cut being set up in the cut panel, drawn over the scene; set by the app each frame.
@@ -71,8 +73,8 @@ pub struct Viewport {
     highlight_key: Option<String>,
     /// A swarf cut's model, its faces, and whether more are being picked; set by the app each
     /// frame. A face clicked, and Esc to stop picking, go back the same way.
-    pub face_pick: Option<(String, Vec<usize>, bool)>,
-    pub picked_face: Option<Vec<usize>>,
+    pub face_pick: Option<FacePick>,
+    pub picked_face: Option<(String, Vec<usize>)>,
     pub stop_face_pick: bool,
     /// A profile's lines while picking which to leave out: the table angle, each line (id,
     /// points in the cut plane, left out), whether picking; set by the app each frame. The line
@@ -290,7 +292,7 @@ impl Viewport {
                 sketch_ui.instructions.clone()
             } else if self.lay_flat.is_some() {
                 "Bottom face: click the face of the model to put down on the table. Esc cancels.".to_owned()
-            } else if self.face_pick.as_ref().is_some_and(|(_, _, on)| *on) {
+            } else if self.face_pick.as_ref().is_some_and(|(_, on)| *on) {
                 "Swarf faces: click a face of the model for the wire to follow; the click takes the whole surface \
                  the wire can follow from it (Alt-click takes the face alone), and a second click takes it away. \
                  The wire lies along the faces at every height, so they must be made of level straight lines.\n\
@@ -338,7 +340,7 @@ impl Viewport {
                 && !self.picking_plane
                 && self.pick_start.is_none()
                 && self.lay_flat.is_none()
-                && !self.face_pick.as_ref().is_some_and(|(_, _, on)| *on)
+                && !self.face_pick.as_ref().is_some_and(|(_, on)| *on)
                 && self.line_pick.is_none()
                 && !grab;
             if free && response.clicked_by(egui::PointerButton::Primary) {
@@ -483,6 +485,7 @@ impl Viewport {
             simulating,
             preview_id,
             self.stock_edit,
+            self.shown.eye().z < -0.6,
         );
         if self.scene_key.as_ref() == Some(&key) {
             return;
@@ -490,7 +493,11 @@ impl Viewport {
         let (palette, _, machine) = scene::colours(tokens);
         let job = &session.job;
         let mut content = SceneGeometry::default();
-        scene::turntable(&mut content, job.machine.table_radius as f32, machine, palette.grid_major);
+        // Seen from below, the turntable is drawn last and faint, so the models show through it.
+        let below = key.8;
+        if !below {
+            scene::turntable(&mut content, job.machine.table_radius as f32, machine, palette.grid_major);
+        }
         // Models (before the see-through stock, which would hide them), with their outline
         // where the mesh is small enough to work it out quickly.
         // The selected one tinted, its edges in the accent.
@@ -515,6 +522,10 @@ impl Viewport {
         if display.stock && !simulating {
             let fill = theme::linear(tokens.stock.gamma_multiply(0.16));
             scene::stock(&mut content, &job.stock, fill, palette.stock_edge);
+        }
+        if below {
+            let faint = [machine[0], machine[1], machine[2], 0.15];
+            scene::turntable(&mut content, job.machine.table_radius as f32, faint, palette.grid_major);
         }
         // The cut paths: those shown, the selected one bold; the preview over them.
         let selected = session.view.selection.as_deref();
@@ -784,7 +795,8 @@ impl Viewport {
     }
 
     /// While laying a model flat: the face under the pointer, and a click puts it down. While
-    /// picking a swarf cut's faces: a click adds the face under the pointer, or takes it away.
+    /// picking a swarf cut's faces: a click on any model adds the surface under the pointer, or
+    /// takes it away.
     fn pick_face(
         &mut self,
         ui: &Ui,
@@ -793,9 +805,51 @@ impl Viewport {
         session: &Session,
         requests: &mut Vec<Request>,
     ) {
-        let picking = self.face_pick.as_ref().filter(|(_, _, on)| *on).map(|(id, _, _)| id.clone());
-        let id = picking.clone().or_else(|| self.lay_flat.clone());
-        let Some(model) = id.as_deref().and_then(|id| session.job.model(id)) else {
+        let done = ui.input(|i| i.key_pressed(egui::Key::Escape));
+        if self.face_pick.as_ref().is_some_and(|(_, on)| *on) {
+            // The nearest visible model under the pointer, and its triangle there.
+            let hit = response.hover_pos().and_then(|p| self.ray(rect, p)).and_then(|(o, d)| {
+                session
+                    .job
+                    .models
+                    .iter()
+                    .filter(|m| m.visible)
+                    .filter_map(|m| m.mesh.raycast(o, d).map(|(t, tri)| (t, m, tri)))
+                    .min_by(|a, b| a.0.total_cmp(&b.0))
+                    .map(|(_, m, tri)| (m, tri))
+            });
+            self.hover_triangle = hit.map(|(_, t)| t);
+            if hit.is_some() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            // A click takes the whole surface the wire can follow from the face; Alt, the face alone.
+            let alone = ui.input(|i| i.modifiers.alt);
+            let face = hit.map(|(m, t)| (m, m.faces.face_of(t).unwrap_or(t)));
+            let fresh = |h: &(String, usize, bool, Vec<usize>)| {
+                face.is_some_and(|(m, f)| h.0 == m.id && h.1 == f && h.2 == alone)
+            };
+            if !self.hover_surface.as_ref().is_some_and(fresh) {
+                self.hover_surface = face.map(|(m, f)| {
+                    let faces = if alone {
+                        vec![f]
+                    } else {
+                        CosmicCut_engine::swarf::surface(m, f, CosmicCut_engine::swarf::DEFAULT_TOLERANCE)
+                    };
+                    (m.id.clone(), f, alone, faces)
+                });
+            }
+            if response.clicked()
+                && hit.is_some()
+                && let Some((id, _, _, faces)) = &self.hover_surface
+            {
+                self.picked_face = Some((id.clone(), faces.clone()));
+            }
+            if done || response.secondary_clicked() {
+                self.stop_face_pick = true;
+            }
+            return;
+        }
+        let Some(model) = self.lay_flat.as_deref().and_then(|id| session.job.model(id)) else {
             self.lay_flat = None;
             self.hover_triangle = None;
             return;
@@ -807,34 +861,6 @@ impl Viewport {
             .map(|(_, t)| t);
         if self.hover_triangle.is_some() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        let done = ui.input(|i| i.key_pressed(egui::Key::Escape));
-        if picking.is_some() {
-            // A click takes the whole surface the wire can follow from the face; Alt, the face alone.
-            let alone = ui.input(|i| i.modifiers.alt);
-            let face = self.hover_triangle.map(|t| model.faces.face_of(t).unwrap_or(t));
-            let fresh = |h: &(String, usize, bool, Vec<usize>)| {
-                Some((h.0.as_str(), h.1, h.2)) == face.map(|f| (model.id.as_str(), f, alone))
-            };
-            if !self.hover_surface.as_ref().is_some_and(fresh) {
-                self.hover_surface = face.map(|f| {
-                    let faces = if alone {
-                        vec![f]
-                    } else {
-                        CosmicCut_engine::swarf::surface(model, f, CosmicCut_engine::swarf::DEFAULT_TOLERANCE)
-                    };
-                    (model.id.clone(), f, alone, faces)
-                });
-            }
-            if response.clicked()
-                && let Some((_, _, _, faces)) = &self.hover_surface
-            {
-                self.picked_face = Some(faces.clone());
-            }
-            if done || response.secondary_clicked() {
-                self.stop_face_pick = true;
-            }
-            return;
         }
         if response.clicked()
             && let Some(t) = self.hover_triangle
@@ -850,44 +876,46 @@ impl Viewport {
     }
 
     /// Faces drawn over everything: the one under the pointer while laying a model flat, or a
-    /// swarf cut's faces (and the surface under the pointer while picking them).
+    /// swarf cut's faces on every model (and the surface under the pointer while picking them).
     fn update_highlight(&mut self, session: &Session, tokens: &Tokens) {
         let Some(gpu) = &mut self.gpu else { return };
-        // (face, colour): picked swarf faces in their own colour, the surface under the pointer
-        // in the accent.
-        let mut faces: Vec<(usize, egui::Color32)> = Vec::new();
-        let mut on: Option<&CosmicCut_engine::model::Model> = None;
-        if let Some((id, picked, picking)) = &self.face_pick {
-            on = session.job.model(id);
-            if on.is_some() {
-                faces.extend(picked.iter().map(|f| (*f, tokens.warning.gamma_multiply(0.9))));
-                if let Some((_, _, _, hover)) =
-                    self.hover_surface.as_ref().filter(|_| *picking && self.hover_triangle.is_some())
-                {
-                    faces.extend(hover.iter().map(|f| (*f, tokens.accent.gamma_multiply(0.9))));
+        // (model, face, colour): picked swarf faces in their own colour, the surface under the
+        // pointer in the accent.
+        let mut faces: Vec<(&CosmicCut_engine::model::Model, usize, egui::Color32)> = Vec::new();
+        if let Some((parts, picking)) = &self.face_pick {
+            for (id, picked) in parts {
+                if let Some(m) = session.job.model(id) {
+                    faces.extend(picked.iter().map(|f| (m, *f, tokens.warning.gamma_multiply(0.9))));
                 }
             }
-        } else if let Some(m) = self.lay_flat.as_deref().and_then(|id| session.job.model(id)) {
-            on = Some(m);
-            if let Some(t) = self.hover_triangle {
-                faces.push((m.faces.face_of(t).unwrap_or(t), tokens.accent.gamma_multiply(0.7)));
+            if let Some((id, _, _, hover)) =
+                self.hover_surface.as_ref().filter(|_| *picking && self.hover_triangle.is_some())
+                && let Some(m) = session.job.model(id)
+            {
+                faces.extend(hover.iter().map(|f| (m, *f, tokens.accent.gamma_multiply(0.9))));
             }
+        } else if let Some(m) = self.lay_flat.as_deref().and_then(|id| session.job.model(id))
+            && let Some(t) = self.hover_triangle
+        {
+            faces.push((m, m.faces.face_of(t).unwrap_or(t), tokens.accent.gamma_multiply(0.7)));
         }
-        let key = on.map(|m| format!("{} {faces:?} {}", m.id, session.job.revision));
+        let key = Some(format!(
+            "{:?} {}",
+            faces.iter().map(|(m, f, c)| (m.id.as_str(), *f, *c)).collect::<Vec<_>>(),
+            session.job.revision
+        ));
         if key == self.highlight_key {
             return;
         }
         let mut g = SceneGeometry::default();
-        if let Some(m) = on {
-            for (face, colour) in &faces {
-                let colour = theme::linear(*colour);
-                let tris: Vec<usize> =
-                    if m.faces.faces.is_empty() { vec![*face] } else { m.faces.triangles_of(*face).collect() };
-                for tri in tris {
-                    if let Some(idx) = m.mesh.triangles().get(tri) {
-                        let [a, b, c] = m.mesh.corners(*idx);
-                        g.push_triangle(a, b, c, colour);
-                    }
+        for (m, face, colour) in &faces {
+            let colour = theme::linear(*colour);
+            let tris: Vec<usize> =
+                if m.faces.faces.is_empty() { vec![*face] } else { m.faces.triangles_of(*face).collect() };
+            for tri in tris {
+                if let Some(idx) = m.mesh.triangles().get(tri) {
+                    let [a, b, c] = m.mesh.corners(*idx);
+                    g.push_triangle(a, b, c, colour);
                 }
             }
         }
@@ -1117,6 +1145,9 @@ fn trim(v: f64) -> String {
     let s = format!("{v:.2}");
     s.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
+
+/// A swarf cut's faces by model (id, face numbers), and whether more are being picked.
+pub type FacePick = (Vec<(String, Vec<usize>)>, bool);
 
 /// A profile's lines while picking: the table angle, each line (id, points in the cut plane,
 /// left out), and whether picking.

@@ -911,8 +911,8 @@ impl eframe::App for CosmicApp {
         let face = self.viewport.picked_face.take();
         let stop = std::mem::take(&mut self.viewport.stop_face_pick);
         if let Some(panel) = self.cut_panel.as_mut() {
-            if let Some(f) = face {
-                panel.toggle_faces(&f);
+            if let Some((model, f)) = face {
+                panel.toggle_faces(&model, &f);
             }
             if stop {
                 panel.picking_faces = false;

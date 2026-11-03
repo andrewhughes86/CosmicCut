@@ -62,10 +62,12 @@ fn near(p: DVec2, a: DVec2, b: DVec2) -> f64 {
     p.distance(a + ab * t)
 }
 
-fn body(m: &Model) -> Body<'_> {
-    let tris: Vec<[DVec3; 3]> = m.mesh.triangles().iter().map(|t| m.mesh.corners(*t).map(|c| c.as_dvec3())).collect();
-    let b = m.bounds();
-    let (lo, hi) = (b.min.as_dvec3(), b.max.as_dvec3());
+fn body<'a>(name: &'a str, tris: Vec<[DVec3; 3]>) -> Body<'a> {
+    let (mut lo, mut hi) = (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY));
+    for c in tris.iter().flatten() {
+        lo = lo.min(*c);
+        hi = hi.max(*c);
+    }
     let corners = [0, 1, 2, 3, 4, 5, 6, 7].map(|k| {
         DVec3::new(
             if k & 1 == 0 { lo.x } else { hi.x },
@@ -73,42 +75,76 @@ fn body(m: &Model) -> Body<'_> {
             if k & 4 == 0 { lo.z } else { hi.z },
         )
     });
-    Body { name: &m.name, tris, corners, lo: lo.z, hi: hi.z }
+    Body { name, tris, corners, lo: lo.z, hi: hi.z }
 }
 
-/// The first place along `path` where the wire touches `b`.
-fn first_hit(path: &WirePath, b: &Body<'_>, clear: f64) -> Option<WirePos> {
-    let mut at = path.start;
-    if b.hit(&at, clear) {
-        return Some(at);
-    }
-    for m in &path.moves {
-        let n = ((at.uh().distance(m.to.uh()) / STEP).max((m.to.b - at.b).abs() / TURN).ceil() as usize)
-            .clamp(1, MAX_STEPS);
-        for k in 1..=n {
-            let p = at.lerp(&m.to, k as f64 / n as f64);
-            if b.hit(&p, clear) {
-                return Some(p);
-            }
+fn triangles(m: &Model, except: &std::collections::HashSet<usize>) -> Vec<[DVec3; 3]> {
+    m.mesh
+        .triangles()
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !except.contains(i))
+        .map(|(_, t)| m.mesh.corners(*t).map(|c| c.as_dvec3()))
+        .collect()
+}
+
+/// Models the wire must keep out of, ready to test moves against.
+pub struct Obstacles<'a> {
+    bodies: Vec<Body<'a>>,
+}
+
+impl<'a> Obstacles<'a> {
+    pub fn new(models: &[&'a Model]) -> Self {
+        let none = std::collections::HashSet::new();
+        Self {
+            bodies: models.iter().map(|m| body(&m.name, triangles(m, &none))).filter(|b| !b.tris.is_empty()).collect(),
         }
-        at = m.to;
     }
-    None
+
+    /// Adds `m` less its triangles `except` (the faces a cut is following, which the wire runs
+    /// alongside).
+    pub fn with_part(mut self, m: &'a Model, except: &std::collections::HashSet<usize>) -> Self {
+        let b = body(&m.name, triangles(m, except));
+        if !b.tris.is_empty() {
+            self.bodies.push(b);
+        }
+        self
+    }
+
+    /// The first model the wire touches (with `clear` either side) going from `from` to `to`,
+    /// and where.
+    pub fn along(&self, from: WirePos, to: WirePos, clear: f64) -> Option<(&'a str, WirePos)> {
+        let n = ((from.uh().distance(to.uh()) / STEP).max((to.b - from.b).abs() / TURN).ceil() as usize)
+            .clamp(1, MAX_STEPS);
+        (0..=n).find_map(|k| {
+            let p = from.lerp(&to, k as f64 / n as f64);
+            self.bodies.iter().find(|b| b.hit(&p, clear)).map(|b| (b.name, p))
+        })
+    }
+
+    /// The first model the wire touches along `path`.
+    pub fn path(&self, path: &WirePath, clear: f64) -> Option<(&'a str, WirePos)> {
+        let mut at = path.start;
+        for m in &path.moves {
+            if let Some(hit) = self.along(at, m.to, clear) {
+                return Some(hit);
+            }
+            at = m.to;
+        }
+        None
+    }
 }
 
 /// Fails if the cut's wire (with `clear` either side) would touch any of `others`.
 pub fn check(others: &[&Model], built: &Built, clear: f64) -> EngineResult<()> {
-    for m in others {
-        let b = body(m);
-        let hit =
-            first_hit(&built.path, &b, clear).or_else(|| built.release.as_ref().and_then(|r| first_hit(r, &b, clear)));
-        if let Some(p) = hit {
-            return Err(EngineError::InvalidParams(format!(
-                "the wire would cut into {} (the table at B {:.1}°, the wire {:.1} mm up): move that model clear, or \
-                 for a cut from models, cut it in this cut too",
-                b.name, p.b, p.h
-            )));
-        }
+    let o = Obstacles::new(others);
+    let hit = o.path(&built.path, clear).or_else(|| built.release.as_ref().and_then(|r| o.path(r, clear)));
+    if let Some((name, p)) = hit {
+        return Err(EngineError::InvalidParams(format!(
+            "the wire would cut into {name} (the table at B {:.1}°, the wire {:.1} mm up): move that model clear, or \
+             for a cut from models, cut it in this cut too",
+            p.b, p.h
+        )));
     }
     Ok(())
 }
