@@ -13,7 +13,7 @@ foam come away in the simulation, and post G-code for the machine.
 
 Download the file for your system from the
 **[latest release](https://github.com/andrewhughes86/CosmicCut/releases/latest)** (the version is
-in each file's name, e.g. `CosmicCut-0.5.0-windows-x64-setup.exe`):
+in each file's name, e.g. `CosmicCut-0.5.1-windows-x64-setup.exe`):
 
 | System | File |
 | --- | --- |
@@ -248,8 +248,8 @@ cuts, a DXF arch and an SVG chess-pawn half profile.
 - Pushing a version tag builds the Windows, macOS and Linux packages and publishes a release
   (`.github/workflows/release.yml`; the packaging files are in `packaging/`):
 
-      git tag v0.5.0
-      git push origin v0.5.0
+      git tag v0.5.1
+      git push origin v0.5.1
 
   For a new version, first bump `version` in the root `Cargo.toml` and add its section to
   `CHANGELOG.md`; the release notes start with that section.

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1
+
+- While a cut is set up with the table turned to its angle, the wire is now drawn square to the
+  cut's plane (and the floor grid stays still), as in the simulation. Before, the wire turned
+  with the table and crossed the outline at an angle.
+
 ## 0.5.0
 
 ### Profiles and two-views

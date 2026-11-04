@@ -663,8 +663,9 @@ impl Viewport {
         let jb = job.bounds();
         content.bounds.include(jb.min);
         content.bounds.include(jb.max);
-        // While simulating, the grid is drawn with the wire, still while the table turns.
-        let mut world = if display.grid && !simulating {
+        // While simulating (or setting up a cut, the table turned to it), the grid is drawn with
+        // the wire, still while the table turns.
+        let mut world = if display.grid && !simulating && !self.cut_open {
             scene::grid(&content.bounds, &palette, sketch::grid_step(session.prefs.units) as f32)
         } else {
             SceneGeometry::default()
@@ -730,9 +731,11 @@ impl Viewport {
         let job = &session.job;
         let pos = match session.sim.as_deref() {
             Some(sim) => sim.wire(),
-            // Out of the simulation the wire waits at home, machine X0 Y0.
-            None => CosmicCut_engine::wire::WirePos::new(-job.machine.table_x, job.machine.wire_y0, 0.0),
+            // Out of the simulation the wire waits at home, machine X0 Y0, with the table at the
+            // angle shown (a cut being set up turns it), so the wire lies across that cut's plane.
+            None => CosmicCut_engine::wire::WirePos::new(-job.machine.table_x, job.machine.wire_y0, self.table_b),
         };
+        let turned = session.sim.is_some() || self.cut_open;
         let shown = session.prefs.display.machine;
         let key = [
             (pos.u * 100.0) as i64,
@@ -740,7 +743,7 @@ impl Viewport {
             (pos.b * 100.0) as i64,
             i64::from(shown)
                 | (i64::from(session.prefs.theme == Theme::Light) << 1)
-                | (i64::from(session.sim.is_some() && session.prefs.display.grid) << 2)
+                | (i64::from(turned && session.prefs.display.grid) << 2)
                 | ((job.revision as i64) << 3),
         ];
         if self.wire_key == Some(key) {
@@ -752,7 +755,7 @@ impl Viewport {
             scene::machine(&mut g, session, &pos, wire, machine);
         }
         // The floor grid stays still while the table turns: drawn turned back by B.
-        if session.sim.is_some() && session.prefs.display.grid {
+        if turned && session.prefs.display.grid {
             let mut grid =
                 scene::grid(&job.bounds(), &tokens.scene_palette(), sketch::grid_step(session.prefs.units) as f32);
             scene::rotate_z(&mut grid, -pos.b);
