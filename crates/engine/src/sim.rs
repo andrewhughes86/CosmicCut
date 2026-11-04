@@ -27,6 +27,16 @@ pub struct Sim {
     stock: Stock,
     /// Keeps applied to the voxels so far.
     applied: usize,
+    /// The cells that are part of a model: a piece of foam holding none of them is waste.
+    parts: Vec<bool>,
+    /// Each model's id and the cells inside it.
+    model_cells: Vec<(String, Vec<usize>)>,
+    /// For each keep, the models off the table by then (its operation's and its cut's).
+    off_table: Vec<Vec<String>>,
+    /// The cells of pieces taken off the table: later cuts do not touch them.
+    set_aside: Vec<usize>,
+    /// The same, cell by cell.
+    aside: Vec<bool>,
     /// Cuts the program came from, by index: their names.
     pub cut_names: Vec<String>,
     /// Where the machine stops for the operator: (seconds, what to tell them).
@@ -38,7 +48,13 @@ pub struct Sim {
 pub const SPEEDS: &[f64] = &[1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 1000.0];
 
 impl Sim {
-    pub fn new(machine: &Machine, stock: &Stock, cuts: &[Cut], ops: &[crate::op::Operation]) -> Self {
+    pub fn new(
+        machine: &Machine,
+        stock: &Stock,
+        cuts: &[Cut],
+        ops: &[crate::op::Operation],
+        models: &[crate::model::Model],
+    ) -> Self {
         let program = Program::build(machine, stock, cuts, ops);
         let stops: Vec<(f64, String)> = program
             .op_starts
@@ -56,12 +72,50 @@ impl Sim {
         // Fast enough to watch a long job: about a minute of playback by default.
         let wanted = program.duration() / 60.0;
         let speed = SPEEDS.iter().copied().find(|s| *s >= wanted).unwrap_or(1000.0);
+        let voxels = foam(stock);
+        let parts = voxels.as_ref().map(|v| part_cells(v, models)).unwrap_or_default();
+        let model_cells: Vec<(String, Vec<usize>)> = voxels
+            .as_ref()
+            .map(|v| {
+                models
+                    .iter()
+                    .map(|m| {
+                        let cells = part_cells(v, std::slice::from_ref(m));
+                        (m.id.clone(), cells.iter().enumerate().filter(|(_, c)| **c).map(|(n, _)| n).collect())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let off_table: Vec<Vec<String>> = program
+            .keeps
+            .iter()
+            .map(|(_, owner, _)| {
+                let Some(cut) = cuts.get(*owner) else { return Vec::new() };
+                let mut off: Vec<String> =
+                    ops.iter().find(|o| o.id == cut.op).map(|o| o.ignore.clone()).unwrap_or_default();
+                off.extend(
+                    cut.params
+                        .get("ignore")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned),
+                );
+                off
+            })
+            .collect();
         Self {
             program,
             time: 0.0,
             playing: false,
             speed,
-            voxels: foam(stock),
+            voxels,
+            parts,
+            model_cells,
+            off_table,
+            set_aside: Vec::new(),
+            aside: Vec::new(),
             stock: *stock,
             applied: 0,
             cut_names: cuts.iter().map(|c| c.name.clone()).collect(),
@@ -100,6 +154,8 @@ impl Sim {
         if t < self.time - 1.0e-9 {
             self.voxels = foam(&self.stock);
             self.applied = 0;
+            self.set_aside.clear();
+            self.aside.clear();
         }
         self.time = t;
         let (_, i) = self.program.at_time(t);
@@ -115,7 +171,31 @@ impl Sim {
                 break;
             }
             if let Some(v) = &mut self.voxels {
+                // Models off the table by this cut: their pieces are set aside, out of its way.
+                let off = self.off_table.get(self.applied).cloned().unwrap_or_default();
+                let seeds: Vec<usize> = self
+                    .model_cells
+                    .iter()
+                    .filter(|(id, _)| off.contains(id))
+                    .flat_map(|(_, cells)| cells.iter().copied())
+                    .collect();
+                if !seeds.is_empty() {
+                    let [nx, ny, nz] = v.dims();
+                    self.aside.resize(nx * ny * nz, false);
+                    for n in v.piece_of(&seeds) {
+                        if let Some(a) = self.aside.get_mut(n)
+                            && !*a
+                        {
+                            *a = true;
+                            self.set_aside.push(n);
+                        }
+                    }
+                }
+                let saved = v.values_of(&self.set_aside);
                 apply(v, keep);
+                // Foam cut free of every part is waste: it falls away.
+                v.drop_loose(&self.parts);
+                v.restore(&self.set_aside, &saved);
             }
             self.applied += 1;
         }
@@ -184,6 +264,33 @@ impl Sim {
     }
 }
 
+/// The cells inside the models (and those their corners are in, so a part thinner than a cell
+/// still counts).
+pub fn part_cells(v: &Voxels, models: &[crate::model::Model]) -> Vec<bool> {
+    let tris: Vec<[DVec3; 3]> = models
+        .iter()
+        .flat_map(|m| m.mesh.triangles().iter().map(|t| m.mesh.corners(*t).map(|p| p.as_dvec3())))
+        .collect();
+    let mut cells = v.part_cells(&tris);
+    let [nx, ny, nz] = v.dims();
+    let (o, cell) = (v.origin(), v.cell());
+    for p in tris.iter().flatten() {
+        let q = (*p - o) / cell;
+        if q.min_element() < 0.0 {
+            continue;
+        }
+        let (i, j, k) = (q.x as usize, q.y as usize, q.z as usize);
+        if i < nx
+            && j < ny
+            && k < nz
+            && let Some(c) = cells.get_mut((k * ny + j) * nx + i)
+        {
+            *c = true;
+        }
+    }
+    cells
+}
+
 /// The stock as voxels, about [`MAX_CELLS`] of them.
 pub fn foam(stock: &Stock) -> Option<Voxels> {
     let b = stock.bounds();
@@ -228,6 +335,24 @@ pub fn apply(v: &mut Voxels, keep: &Keep) {
     let us: Vec<f64> = corners.iter().map(|c| c.dot(ax)).collect();
     let lo = DVec2::new(us.iter().copied().fold(f64::INFINITY, f64::min), o.z) - band * 2.0;
     let hi = DVec2::new(us.iter().copied().fold(f64::NEG_INFINITY, f64::max), far.z) + band * 2.0;
+    // Pieces kept apart (parts cut free of each other) stay apart: a cell whose centre is within a
+    // cell of another piece goes, even where the gap between them is narrower than a cell.
+    if keep.apart && !keep.outside && keep.regions.len() > 1 && keep.regions.len() <= MAX_PIECES {
+        let fields: Vec<Field2> =
+            keep.regions.iter().filter_map(|r| Field2::new(std::slice::from_ref(r), lo, hi, cell, band)).collect();
+        if fields.len() == keep.regions.len() {
+            v.intersect(|p| {
+                let q = DVec2::new(p.dot(ax), p.z);
+                let d: Vec<f64> = fields.iter().map(|f| f.sample(q)).collect();
+                let Some((best, inside)) = d.iter().copied().enumerate().max_by(|a, b| a.1.total_cmp(&b.1)) else {
+                    return -1.0;
+                };
+                let crowded = d.iter().enumerate().any(|(k, dk)| k != best && *dk > -cell);
+                if inside > 0.0 && crowded { -1.0 } else { inside }
+            });
+            return;
+        }
+    }
     let Some(field) = Field2::new(&keep.regions, lo, hi, cell, band) else { return };
     let outside = keep.outside;
     v.intersect(|p| {
@@ -235,6 +360,9 @@ pub fn apply(v: &mut Voxels, keep: &Keep) {
         if outside { -d } else { d }
     });
 }
+
+/// Most separate pieces a keep is simulated with one by one.
+const MAX_PIECES: usize = 64;
 
 /// Signed distance to a set of regions on a grid (positive inside), exact within `band` of the
 /// edges and ±`band` beyond.

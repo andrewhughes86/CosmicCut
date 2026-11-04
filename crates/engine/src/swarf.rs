@@ -631,7 +631,14 @@ pub(crate) fn swarf(cx: &Context<'_>, p: &Value) -> EngineResult<Built> {
         let level_out = WirePos::new(clear * p.waste, last.wire.h, last.wire.b);
         let lines: Vec<WirePos> = p.stations.iter().rev().map(|s| WirePos::new(s.face_u, s.wire.h, s.wire.b)).collect();
         let sweep = Some(Sweep { lines, waste: p.waste });
-        let keep = |at: usize| Keep { b: first.wire.b, regions: Vec::new(), outside: false, at, sweep: sweep.clone() };
+        let keep = |at: usize| Keep {
+            b: first.wire.b,
+            regions: Vec::new(),
+            outside: false,
+            at,
+            sweep: sweep.clone(),
+            apart: false,
+        };
         if blocked(k, &own, last.wire, level_out).is_none() {
             out.path.push(MoveKind::Lead, level_out, c.feed);
             out.keeps.push(keep(out.path.moves.len()));

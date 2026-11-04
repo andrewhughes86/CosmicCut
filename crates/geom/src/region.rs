@@ -12,7 +12,8 @@ use i_overlay::core::fill_rule::FillRule;
 use i_overlay::core::overlay_rule::OverlayRule;
 use i_overlay::float::single::SingleFloatOverlay;
 use i_overlay::mesh::float::outline::offset::OutlineOffset;
-use i_overlay::mesh::float::style::{LineJoin, OutlineStyle};
+use i_overlay::mesh::float::stroke::offset::StrokeOffset;
+use i_overlay::mesh::float::style::{LineJoin, OutlineStyle, StrokeStyle};
 
 use crate::offset::{arc_step, signed_area2};
 
@@ -79,6 +80,24 @@ pub fn offset(shapes: &[Shape], distance: f64, tolerance: f64) -> Vec<Shape> {
     let raw = to_raw(shapes);
     let style = OutlineStyle::new(distance).line_join(LineJoin::Round(arc_step(distance, tolerance)));
     let out = catch_unwind(AssertUnwindSafe(|| raw.outline_as::<i64>(&style))).unwrap_or_default();
+    from_raw(out)
+}
+
+/// The band `width` wide along each open path (a wire's kerf along where it went).
+pub fn stroke(paths: &[Vec<DVec2>], width: f64) -> Vec<Shape> {
+    if !(width.is_finite() && width > 0.0) {
+        return Vec::new();
+    }
+    let raw: Vec<Vec<[f64; 2]>> = paths
+        .iter()
+        .filter(|p| p.len() >= 2 && p.iter().all(|q| q.is_finite()))
+        .map(|p| p.iter().map(|q| [q.x, q.y]).collect())
+        .collect();
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    let style = StrokeStyle::new(width);
+    let out = catch_unwind(AssertUnwindSafe(|| raw.stroke(style, false))).unwrap_or_default();
     from_raw(out)
 }
 

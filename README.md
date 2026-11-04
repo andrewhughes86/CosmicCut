@@ -13,7 +13,7 @@ foam come away in the simulation, and post G-code for the machine.
 
 Download the file for your system from the
 **[latest release](https://github.com/andrewhughes86/CosmicCut/releases/latest)** (the version is
-in each file's name, e.g. `CosmicCut-0.4.1-windows-x64-setup.exe`):
+in each file's name, e.g. `CosmicCut-0.5.0-windows-x64-setup.exe`):
 
 | System | File |
 | --- | --- |
@@ -62,10 +62,13 @@ Uninstalling leaves that file alone. Copy it to keep a backup.
   airfoil .dat and XY point files import as sketches you can edit, and there's a NACA airfoil
   generator.
 - **Cut types.** Profile (single or indexed around the table), Two-view (front and side),
-  Lathe (a half profile turned on the table) and Slabs (sheets sliced from the block).
-- **Profiles you can trim.** Leave lines of the sketch out of a profile cut by clicking them,
-  and pick which end the wire starts from. For example, leave out a part's bottom and start at
-  its outer corner, so the part-off runs back out to the outside.
+  Lathe (a half profile turned on the table) and Slabs (sheets sliced from the block). Profile
+  and Two-view follow a sketch or the outline of one or more models.
+- **Profiles by chains, as in Fusion.** The models go see-through and the outline is drawn.
+  Click its lines one at a time to build chains; each chain has an arrow you click to cut it
+  the other way, and chains are cut in the order picked, with lead-in and lead-out lengths.
+  A model's bottom is never cut unless you pick it, and where two models' chains meet the floor
+  the wire bridges along Y0 between them instead of leaving the foam.
 - **Swarf cuts: X, Y and B moving together.** Click faces of a model and the wire lies along
   them at every height while the table turns, for tapered, twisted and turning faces.
 - **The part stays put.** Cuts leave the part joined to the foam under it while the table turns,
@@ -77,7 +80,8 @@ Uninstalling leaves that file alone. Copy it to keep a backup.
   taken off can be listed in the operation's or the cut's settings, and the wire may pass
   through those.
 - **Simulation** of the whole program. The table turns with the foam on it, the waste falls
-  away, and the wire's X, Y and B are shown as it moves.
+  away, and the wire's X, Y and B are shown as it moves. Each part comes out as its own body,
+  and parts taken off the table between operations are set aside untouched.
 - **G-code you control.** Machine and post processor libraries with HotwireCNC, LinuxCNC,
   Mach3/Mach4 and generic posts. Every block of code, the units, decimals, arcs, comments and
   end moves can be edited, and table turns can be written as G1 at a feed you set. The
@@ -86,6 +90,9 @@ Uninstalling leaves that file alone. Copy it to keep a backup.
 - **Safe moves.** The table only turns with the wire clear of the foam, the wire never goes
   below Y0, and the program starts and ends at home, going over the part only when it's in the
   way.
+- **An explorer you can work in.** Ctrl- and Shift-click to select several cuts, models or
+  shapes and delete them in one step; drag cuts to reorder them or move them into another
+  operation; hide the stock and the origin marker with their eyes.
 - **Multiple jobs** in tabs, each with its own undo history.
 
 ## Quick start
@@ -113,9 +120,10 @@ To make your own job:
    - **New sketch**: pick a plane, draw, dimension, then **Finish sketch**.
    - **Import sketch**: DXF, SVG, airfoil .dat or XY points.
 4. **Add a cut** from the gallery: **From model** for models (several at once: the wire follows
-   their outline together, and any model left out must stand clear of the wire), or Profile,
-   Two-view, Lathe or Slabs for a sketch. It opens in the **Cut** tab with a live preview. **Pick the start
-   point** chooses where the wire goes in.
+   their outline together, and any model left out must stand clear of the wire), **Profile** or
+   **Two-view** for a sketch or the models' outline, or Lathe or Slabs. It opens in the **Cut**
+   tab with a live preview, the other cuts hidden and the table turned to the cut's angle. Rest
+   the pointer on a setting's name to see what it does.
 5. **Simulation** to check it, then **Post G-code** to save the program.
 
 **Add operation** splits the program at a machine stop (`M0`/`M1`, with a message), for
@@ -140,6 +148,24 @@ is drawn every 4 in (or 100 mm).
 Snaps (end points, midpoints, curves, lining up with other points or the origin) become
 constraints automatically. A fully constrained sketch turns from cyan to white. Anything the
 solver can't satisfy is refused and the sketch stays as it was.
+
+## Profiles and two-views
+
+Set **Source** to a shape or to **Models** (and tick the models). The models go see-through
+and the outline the wire would follow is drawn on the cut plane; nothing is picked to start.
+
+- **Click lines** one at a time. A line that meets either end of the chain being picked carries
+  it on; any other starts a new chain. Click a picked line to take it out (a chain broken in the
+  middle becomes two). **Alt-click** picks a line's whole run at once.
+- **Direction:** click a chain's arrow (or **Flip** in the panel) to cut it the other way.
+  Chains are cut in the order they were picked; **Remove** or Delete takes one away, **Clear
+  all** takes them all.
+- **Bottoms** (dotted) are left alone unless you pick them.
+- **Lead-in / lead-out length** add straight leads along each chain's ends (none where an end
+  is on Y0). Where kept chains of two models end on the floor next to each other, **Bridge along
+  Y0** runs the wire along the floor between them.
+- A two-view shows one view at a time: **Front** or **Side** turns the table to it and shows its
+  lines.
 
 ## Swarf cuts
 
@@ -222,8 +248,8 @@ cuts, a DXF arch and an SVG chess-pawn half profile.
 - Pushing a version tag builds the Windows, macOS and Linux packages and publishes a release
   (`.github/workflows/release.yml`; the packaging files are in `packaging/`):
 
-      git tag v0.4.1
-      git push origin v0.4.1
+      git tag v0.5.0
+      git push origin v0.5.0
 
   For a new version, first bump `version` in the root `Cargo.toml` and add its section to
   `CHANGELOG.md`; the release notes start with that section.

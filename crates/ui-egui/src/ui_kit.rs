@@ -22,6 +22,9 @@ pub enum Surface {
     Menu,
     /// Floating dialogs that gather a command's input.
     Dialog,
+    /// A question before something that cannot be taken back lightly (deleting): it glows in
+    /// the alert colour.
+    Alert,
     /// A settings panel docked at the side of the window (the toolpath editor).
     SidePanel,
     /// A group of settings inside a panel.
@@ -67,6 +70,18 @@ impl Container {
                     blur: 26,
                     spread: 2,
                     color: t.accent.gamma_multiply(0.38),
+                }),
+            // The alert colour all round and a strong glow of it, over the dimmed window.
+            Surface::Alert => Frame::new()
+                .fill(t.panel_bg)
+                .inner_margin(Margin::ZERO)
+                .corner_radius(CornerRadius::same(8))
+                .stroke(Stroke::new(2.0, alert_colour(t)))
+                .shadow(egui::epaint::Shadow {
+                    offset: [0, 0],
+                    blur: 40,
+                    spread: 4,
+                    color: alert_colour(t).gamma_multiply(0.6),
                 }),
             Surface::Card => Frame::new()
                 .fill(t.raised_bg)
@@ -221,6 +236,54 @@ impl Window {
             *open = false;
         }
         shown
+    }
+}
+
+/// The colour of an alert: the stock's purple on dark, red on light.
+pub fn alert_colour(t: &Tokens) -> egui::Color32 {
+    if t.dark { t.stock } else { t.error }
+}
+
+/// Text that reads on a `fill`: near black on a light one, white on a dark one.
+pub fn ink_on(fill: egui::Color32) -> egui::Color32 {
+    let l = 0.2126 * f32::from(fill.r()) + 0.7152 * f32::from(fill.g()) + 0.0722 * f32::from(fill.b());
+    if l > 100.0 { egui::Color32::from_rgb(24, 6, 6) } else { egui::Color32::WHITE }
+}
+
+/// A question that has to be answered before anything else: the window behind dimmed, the
+/// question in the middle on [`Surface::Alert`], its title bar in the alert colour.
+pub struct Alert {
+    title: String,
+}
+
+impl Alert {
+    pub fn danger(title: impl Into<String>) -> Self {
+        Self { title: title.into() }
+    }
+
+    /// Shows the alert; `open` is cleared by Esc or a click outside it.
+    pub fn show<R>(self, ctx: &egui::Context, t: &Tokens, open: &mut bool, add: impl FnOnce(&mut Ui) -> R) -> R {
+        let shown = egui::Modal::new(egui::Id::new(("alert", &self.title)))
+            .frame(Container::new(Surface::Alert).frame(t))
+            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(440.0);
+                let (bar, _) = ui.allocate_exact_size(egui::vec2(440.0, 34.0), egui::Sense::hover());
+                let painter = ui.painter();
+                painter.rect_filled(bar, CornerRadius { nw: 7, ne: 7, sw: 0, se: 0 }, alert_colour(t));
+                painter.text(
+                    egui::pos2(bar.left() + 16.0, bar.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    format!("⚠  {}", self.title),
+                    egui::FontId::proportional(16.0),
+                    ink_on(alert_colour(t)),
+                );
+                Frame::new().inner_margin(Margin::symmetric(18, 16)).show(ui, add).inner
+            });
+        if shown.should_close() {
+            *open = false;
+        }
+        shown.inner
     }
 }
 

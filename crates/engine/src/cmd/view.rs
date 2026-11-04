@@ -57,6 +57,7 @@ const DISPLAY_PARAMS: &[Param] = &[
     Param::optional("grid", ParamKind::Bool, "Ground grid"),
     Param::optional("view_cube", ParamKind::Bool, "View cube overlay"),
     Param::optional("orientation_triad", ParamKind::Bool, "Screen-corner orientation triad"),
+    Param::optional("origin", ParamKind::Bool, "A marker where the program's X0 Y0 is"),
     Param::optional("stock", ParamKind::Bool, "Stock outline"),
     Param::optional("machine", ParamKind::Bool, "Turntable, towers and wire"),
     Param::optional("rulings", ParamKind::Bool, "Lines across the foam where the wire lies along a cut"),
@@ -320,7 +321,7 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         icon: None,
         shortcut: None,
         params: DISPLAY_PARAMS,
-        returns: "display {grid, view_cube, orientation_triad, stock, machine, rulings, readout}",
+        returns: "display {grid, view_cube, orientation_triad, stock, origin, machine, rulings, readout}",
         enabled: always,
         run: |s, p| {
             let mut display = s.prefs.display;
@@ -341,7 +342,7 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         icon: None,
         shortcut: None,
         params: &[],
-        returns: "display {grid, view_cube, orientation_triad, stock, machine, rulings, readout}",
+        returns: "display {grid, view_cube, orientation_triad, stock, origin, machine, rulings, readout}",
         enabled: always,
         run: |s, _| Ok(s.prefs.display.to_json()),
     },

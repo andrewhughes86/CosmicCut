@@ -14,7 +14,7 @@ fn sim(s: &mut Session) -> EngineResult<&mut Sim> {
         if s.job.cuts.iter().all(|c| c.error.is_some() || c.path.moves.is_empty()) {
             return Err(EngineError::InvalidParams("there are no cuts to simulate".into()));
         }
-        s.sim = Some(Box::new(Sim::new(&s.job.machine, &s.job.stock, &s.job.cuts, &s.job.ops)));
+        s.sim = Some(Box::new(Sim::new(&s.job.machine, &s.job.stock, &s.job.cuts, &s.job.ops, &s.job.models)));
     }
     s.sim.as_deref_mut().ok_or_else(|| EngineError::Internal("the simulation did not start".into()))
 }

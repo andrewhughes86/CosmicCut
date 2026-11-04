@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.5.0
+
+### Profiles and two-views
+
+- **They follow models too.** Set *Source* to *Models* (or right-click a model: *Profile of
+  model…*, *Two-view of model…*) and the wire follows the outline of the chosen models seen
+  along the wire: one view for a profile and its copies, front and side for a two-view.
+- **Contours are picked as chains, as in Fusion.** While a profile or two-view is set up, the
+  models go see-through and the outline is drawn; nothing is picked to start with. Click lines
+  one at a time: a line that meets either end of the chain being picked carries it on, any other
+  starts a new chain, and clicking a picked line takes it out (a chain broken in the middle
+  becomes two). Alt-click picks a line's whole run at once. Picked lines are purple (#6A06D3).
+- **Every chain has a direction.** Click its arrow, or *Flip* in the panel, to cut it the other
+  way. Chains are cut in the order picked.
+- **Lead-in and lead-out lengths**: straight leads along the start and end of each chain.
+- **A model's bottom is not cut** unless you pick it; bottoms are drawn dotted.
+- **Bridges along Y0.** Where picked chains of two models end on the floor next to each other,
+  the wire runs along machine Y0 from one to the next instead of leaving the foam (*Bridge along
+  Y0*, on by default). It never bridges or leaves along the floor under a model, nor up inside a
+  wall's kerf; when no straight way out is clear it goes along the floor into the gap, then up.
+- **Two-view: Front / Side.** A two-view shows one view at a time: the table turns to it and
+  only its lines are drawn and picked. Each chain is listed with its view.
+- While a cut is made or changed, the other cuts' paths are hidden and the table is drawn
+  turned to the cut's angle.
+- Older profile cuts open with every line but the models' bottoms picked, as they were cut.
+
+### The cut panel
+
+- Settings in folding groups (Geometry, Table, Placement, Passes, Linking…), two aligned
+  columns, units beside the values, and what a blank field stands for shown in it. The notes
+  are gone: what a setting does shows when the pointer rests on its name for a second.
+- Settings a chain decides (entry side, start point, direction, bottom) are gone from profiles.
+
+### Simulation
+
+- **Each part comes out as its own body.** A profile's cuts split the foam into pieces: those
+  holding part of a model (or of the shape cut) stay, the rest is waste and goes, even where
+  parts stand closer together than the simulation's cells. Any loose piece with no part in it
+  falls away too. Before, a run of profiles could keep the waste joining the parts, or leave
+  nothing.
+- A model an operation (or cut) says is off the table is set aside whole: later cuts no longer
+  eat into it in the simulation.
+- **Exit simulation** button at the top centre of the viewport.
+
+### Explorer and viewport
+
+- **Select several.** Ctrl-click cuts, models and shapes in the explorer (or models in the
+  viewport) to add them to the selection or take them out; Shift-click selects every row from
+  the last one selected. Delete (key or right-click) deletes them all at once, in one step that
+  one Undo brings back.
+- **Drag cuts** to put them before or after another cut, or onto an operation to make them its
+  last cut. A line shows where it will go (`cut.place` from the console).
+- **Stock and Origin can be hidden** with their eyes in the explorer (or the View options). The
+  origin shows in the viewport as a marker at the program's X0 Y0.
+- **The delete question stands out**: larger, the window behind it dimmed, glowing purple in the
+  dark theme (red in the light one). Enter confirms it.
+
 ## 0.4.1
 
 - **Origin in the explorer.** The program's X0 Y0 can be machine zero (as before) or the

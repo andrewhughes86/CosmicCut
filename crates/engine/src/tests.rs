@@ -464,6 +464,59 @@ fn table_turns_can_be_g1_at_a_feed() {
 }
 
 #[test]
+fn several_items_selected_are_deleted_in_one_step() {
+    let mut s = Session::with_sample();
+    let model = s.job.models[0].id.clone();
+    let first = s.job.cuts[0].id.clone();
+    let second = run(&mut s, "cut.duplicate", json!({ "id": first }))["id"].as_str().unwrap_or_default().to_owned();
+    run(&mut s, "selection.set", json!({ "id": first }));
+    run(&mut s, "selection.set", json!({ "id": second, "add": true }));
+    let picked = run(&mut s, "selection.set", json!({ "id": model, "add": true }));
+    assert_eq!(picked["selected"], json!([first, second, model]));
+    // Ctrl-click on one selected lets it go.
+    run(&mut s, "selection.set", json!({ "id": model, "add": true }));
+    assert_eq!(s.selected_ids(), vec![first.clone(), second.clone()]);
+    // Shift: a range of rows.
+    run(&mut s, "selection.set", json!({ "id": model, "ids": [model, first, second], "add": true }));
+    assert_eq!(s.selected_ids().len(), 3);
+    let undo_before = s.undo.len();
+    let done = run(&mut s, "edit.delete", json!({}));
+    assert_eq!(done["deleted"].as_array().map(Vec::len), Some(3), "{done}");
+    assert!(s.job.cuts.is_empty() && s.job.models.is_empty());
+    assert_eq!(s.undo.len(), undo_before + 1);
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!((s.job.cuts.len(), s.job.models.len()), (2, 1));
+    // A plain click selects one again.
+    run(&mut s, "selection.set", json!({ "id": first }));
+    assert_eq!(s.selected_ids(), vec![first]);
+}
+
+#[test]
+fn cuts_are_placed_in_order_and_into_other_operations() {
+    let mut s = Session::with_sample();
+    let id = |v: Value| v["id"].as_str().unwrap_or_default().to_owned();
+    let a = s.job.cuts[0].id.clone();
+    let b = id(run(&mut s, "cut.duplicate", json!({ "id": a })));
+    let c = id(run(&mut s, "cut.duplicate", json!({ "id": a })));
+    let order = |s: &Session| s.job.cuts.iter().map(|c| (c.id.clone(), c.op.clone())).collect::<Vec<_>>();
+    let first = s.job.cuts[0].op.clone();
+    // Before another cut in the same operation.
+    run(&mut s, "cut.place", json!({ "id": c, "before": a }));
+    assert_eq!(order(&s).iter().map(|x| x.0.clone()).collect::<Vec<_>>(), vec![c.clone(), a.clone(), b.clone()]);
+    // Into a new operation, last in it; then before a cut there.
+    let op2 = id(run(&mut s, "op.add", json!({})));
+    run(&mut s, "cut.place", json!({ "id": a, "op": op2 }));
+    run(&mut s, "cut.place", json!({ "id": c, "before": a }));
+    assert_eq!(order(&s), vec![(b.clone(), first.clone()), (c.clone(), op2.clone()), (a.clone(), op2.clone())]);
+    // Back into the first operation, after its last cut; one undo step each.
+    let undo = s.undo.len();
+    run(&mut s, "cut.place", json!({ "id": a, "op": first }));
+    assert_eq!(order(&s)[1], (a.clone(), first.clone()));
+    assert_eq!(s.undo.len(), undo + 1);
+    assert!(s.execute("cut.place", &json!({ "id": a, "op": first, "before": c })).is_err());
+}
+
+#[test]
 fn machines_and_post_processors_come_from_the_libraries() {
     let mut s = Session::with_sample();
     assert_eq!(s.job.machine.post_name, "HotwireCNC");
@@ -874,6 +927,171 @@ fn several_models_cut_together_and_the_wire_keeps_out_of_the_others() {
 }
 
 #[test]
+fn profiles_of_models_leave_the_bottoms_and_bridge_along_the_floor() {
+    let dir = std::env::temp_dir().join(format!("cosmiccut-outline-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("brick.stl").to_string_lossy().into_owned();
+    let _ = std::fs::write(&path, box_stl([80.0, 60.0, 100.0]));
+    let mut s = Session::new();
+    run(&mut s, "stock.block", json!({ "width": 400.0, "depth": 200.0, "height": 200.0 }));
+    let id = |v: Value| v["id"].as_str().unwrap_or_default().to_owned();
+    let a = id(run(&mut s, "model.import", json!({ "path": path, "units": "mm", "name": "Left" })));
+    let b = id(run(&mut s, "model.import", json!({ "path": path, "units": "mm", "name": "Right" })));
+    run(&mut s, "model.move", json!({ "id": a, "x": -100.0 }));
+    run(&mut s, "model.move", json!({ "id": b, "x": 100.0 }));
+    let p = json!({ "source": "models", "models": [a, b], "kerf": 1.0 });
+    let built = s.preview_cut(crate::cut::CutKind::Profile, &p).unwrap_or_else(|e| panic!("{e}"));
+    let floor = s.job.machine.wire_y0 + 1.0e-3;
+    // Never along a model's bottom: on the floor the wire is only ever outside the bricks.
+    let mut from = built.path.start;
+    let mut bridged = false;
+    for m in &built.path.moves {
+        let to = m.to;
+        if matches!(m.kind, crate::wire::MoveKind::Cut | crate::wire::MoveKind::Lead)
+            && from.h <= floor
+            && to.h <= floor
+        {
+            let (lo, hi) = (from.u.min(to.u), from.u.max(to.u));
+            for centre in [-100.0, 100.0] {
+                assert!(hi <= centre - 39.0 || lo >= centre + 39.0, "along a bottom: {from:?} -> {to:?}");
+            }
+            bridged |= lo <= -60.0 && hi >= 60.0;
+        }
+        from = to;
+    }
+    assert!(bridged, "no bridge between the bricks");
+    // One run, from the left of the foam to the right of it.
+    let lines = crate::cut::cut_lines(&s.job.context(), crate::cut::CutKind::Profile, &p).unwrap_or_default();
+    assert_eq!(lines.iter().filter(|l| l.bottom).count(), 2, "{lines:?}");
+    assert_eq!(lines.iter().filter(|l| !l.bottom).count(), 6);
+    // Leaving out the left brick's top: two runs, each from the foam's side.
+    let top = lines.iter().filter(|l| !l.bottom && l.points.iter().all(|q| q.x < 0.0 && q.y > 50.0)).map(|l| l.id);
+    let skip: Vec<u32> = top.collect();
+    assert_eq!(skip.len(), 1);
+    let mut q = p.clone();
+    q["skip"] = json!(skip);
+    assert!(s.preview_cut(crate::cut::CutKind::Profile, &q).is_ok());
+    // Every line out is an error; the bottom cut through is a loop round each brick.
+    let mut q = p.clone();
+    q["skip"] = json!(lines.iter().map(|l| l.id).collect::<Vec<_>>());
+    assert!(s.preview_cut(crate::cut::CutKind::Profile, &q).is_err());
+    let mut q = p.clone();
+    q["bottom"] = json!("through");
+    assert!(s.preview_cut(crate::cut::CutKind::Profile, &q).is_ok());
+    // A bottom picked by hand is cut: the wire runs along the left brick's bottom.
+    let under: Vec<u32> =
+        lines.iter().filter(|l| l.bottom && l.points.iter().all(|q| q.x < 0.0)).map(|l| l.id).collect();
+    assert_eq!(under.len(), 1);
+    let mut q = p.clone();
+    q["bottoms"] = json!(under);
+    let picked = s.preview_cut(crate::cut::CutKind::Profile, &q).unwrap_or_else(|e| panic!("{e}"));
+    let mut from = picked.path.start;
+    let mut along = false;
+    for m in &picked.path.moves {
+        if m.kind == crate::wire::MoveKind::Cut && from.h <= floor && m.to.h <= floor {
+            along |= from.u.min(m.to.u) < -120.0 && from.u.max(m.to.u) > -80.0;
+        }
+        from = m.to;
+    }
+    assert!(along, "the picked bottom is not cut");
+    // A two-view of both, and the cut is kept.
+    let t = run(&mut s, "cut.twoview", json!({ "source": "models", "models": [a, b] }));
+    assert!(t["moves"].as_u64().unwrap_or(0) > 10, "{t}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn profiles_cut_the_chains_picked_each_way_round_with_leads() {
+    let dir = std::env::temp_dir().join(format!("cosmiccut-chains-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("brick.stl").to_string_lossy().into_owned();
+    let _ = std::fs::write(&path, box_stl([80.0, 60.0, 100.0]));
+    let mut s = Session::new();
+    run(&mut s, "stock.block", json!({ "width": 400.0, "depth": 200.0, "height": 200.0 }));
+    let id = |v: Value| v["id"].as_str().unwrap_or_default().to_owned();
+    let a = id(run(&mut s, "model.import", json!({ "path": path, "units": "mm", "name": "Left" })));
+    let b = id(run(&mut s, "model.import", json!({ "path": path, "units": "mm", "name": "Right" })));
+    run(&mut s, "model.move", json!({ "id": a, "x": -100.0 }));
+    run(&mut s, "model.move", json!({ "id": b, "x": 100.0 }));
+    let kind = crate::cut::CutKind::Profile;
+    let mut p = json!({ "source": "models", "models": [a, b], "kerf": 1.0, "chains": [] });
+    // Nothing picked: nothing to cut.
+    assert!(s.preview_cut(kind, &p).is_err());
+    let lines = crate::cut::cut_lines(&s.job.context(), kind, &p).unwrap_or_default();
+    // A click on a brick's side picks its sides and top, not its bottom.
+    let side = lines.iter().find(|l| !l.bottom && l.points.iter().all(|q| q.x < -130.0)).map_or(0, |l| l.id);
+    let left = crate::cut::chain_of(&lines, side);
+    assert_eq!(left.len(), 3, "{left:?}");
+    let other = lines.iter().find(|l| !l.bottom && l.points.iter().all(|q| q.x > 130.0)).map_or(0, |l| l.id);
+    let right = crate::cut::chain_of(&lines, other);
+    assert_eq!(right.len(), 3);
+    let bottom = lines.iter().find(|l| l.bottom).map_or(0, |l| l.id);
+    assert_eq!(crate::cut::chain_of(&lines, bottom), vec![bottom]);
+    p["chains"] = json!([{ "lines": left }, { "lines": right }]);
+    let built = s.preview_cut(kind, &p).unwrap_or_else(|e| panic!("{e}"));
+    // Each chain runs one end to the other; the second brick's chain starts from its own end.
+    let cuts: Vec<crate::wire::WirePos> =
+        built.path.moves.iter().filter(|m| m.kind == crate::wire::MoveKind::Cut).map(|m| m.to).collect();
+    assert!(cuts.len() > 10);
+    // Reversed, the first chain is cut the other way round.
+    p["chains"] = json!([{ "lines": left, "reverse": true }, { "lines": right }]);
+    let flipped = s.preview_cut(kind, &p).unwrap_or_else(|e| panic!("{e}"));
+    let first = |b: &crate::cut::Built| {
+        b.path.moves.iter().find(|m| m.kind == crate::wire::MoveKind::Cut).map(|m| m.to.u).unwrap_or(0.0)
+    };
+    assert!((first(&built) - first(&flipped)).abs() > 50.0, "{} {}", first(&built), first(&flipped));
+    // Reversed, the left brick's chain ends at its left foot: no bridge under it to the right one.
+    let mut from = flipped.path.start;
+    for m in &flipped.path.moves {
+        let floor = s.job.machine.wire_y0 + 1.0e-3;
+        if m.kind != crate::wire::MoveKind::Rapid && from.h <= floor && m.to.h <= floor {
+            let (lo, hi) = (from.u.min(m.to.u), from.u.max(m.to.u));
+            assert!(hi <= -139.0 || lo >= -61.0, "under the left brick: {from:?} -> {:?}", m.to);
+        }
+        from = m.to;
+    }
+    // A lead in and out on a chain of the top alone: the wire comes along the top from further off.
+    let top = lines.iter().find(|l| l.points.iter().all(|q| q.x < 0.0 && q.y > 50.0)).map_or(0, |l| l.id);
+    let mut q = json!({ "source": "models", "models": [a, b], "kerf": 1.0, "chains": [{ "lines": [top] }] });
+    let plain = s.preview_cut(kind, &q).unwrap_or_else(|e| panic!("{e}"));
+    q["lead_in"] = json!(20.0);
+    q["lead_out"] = json!(20.0);
+    let led = s.preview_cut(kind, &q).unwrap_or_else(|e| panic!("{e}"));
+    let span = |b: &crate::cut::Built| {
+        let us: Vec<f64> =
+            b.path.moves.iter().filter(|m| m.kind != crate::wire::MoveKind::Rapid).map(|m| m.to.u).collect();
+        let inside: Vec<f64> = us.into_iter().filter(|u| u.abs() < 199.0).collect();
+        inside.iter().copied().fold(f64::NEG_INFINITY, f64::max) - inside.iter().copied().fold(f64::INFINITY, f64::min)
+    };
+    assert!(span(&led) > span(&plain) + 30.0, "{} {}", span(&led), span(&plain));
+    // Saved with the job.
+    let c = run(&mut s, "cut.profile", p.clone());
+    let cut = s.job.cut(c["id"].as_str().unwrap_or_default()).map(|c| c.params.clone()).unwrap_or_default();
+    assert_eq!(cut["chains"][0]["reverse"], json!(true));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_shape_profile_cuts_its_chains_too() {
+    let mut s = Session::new();
+    let shape = run(&mut s, "shape.rectangle", json!({ "width": 100.0, "height": 60.0 }));
+    let id = shape["id"].as_str().unwrap_or_default().to_owned();
+    let kind = crate::cut::CutKind::Profile;
+    let p = json!({ "shape": id, "chains": [] });
+    let lines = crate::cut::cut_lines(&s.job.context(), kind, &p).unwrap_or_default();
+    // A rectangle in the middle of the stock: four lines, one closed chain.
+    assert_eq!(lines.len(), 4, "{lines:?}");
+    let chain = crate::cut::chain_of(&lines, lines[0].id);
+    assert_eq!(chain.len(), 4);
+    let mut q = p.clone();
+    q["chains"] = json!([{ "lines": chain }]);
+    q["lead_in"] = json!(10.0);
+    let built = s.preview_cut(kind, &q).unwrap_or_else(|e| panic!("{e}"));
+    assert!(built.path.moves.iter().filter(|m| m.kind == crate::wire::MoveKind::Cut).count() >= 4);
+    assert_eq!(built.keeps.len(), 1);
+}
+
+#[test]
 fn a_later_operation_can_pass_through_parts_already_taken_off() {
     let dir = std::env::temp_dir().join(format!("cosmiccut-ops-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
@@ -1070,4 +1288,73 @@ fn every_face_of_the_mockup_cuts_with_the_swarf_tool() {
     let all: Vec<usize> = (0..model.faces.faces.len()).collect();
     let r = s.preview_cut(crate::cut::CutKind::Swarf, &json!({ "model": model.id, "faces": all }));
     assert!(r.is_ok(), "all faces: {:?}", r.err());
+    // Profiles and two-views of it, then of it and a copy beside it.
+    let both = |s: &mut Session, models: Value| {
+        run(s, "stock.fit", json!({}));
+        for kind in [crate::cut::CutKind::Profile, crate::cut::CutKind::TwoView] {
+            let r = s.preview_cut(kind, &json!({ "source": "models", "models": models }));
+            assert!(r.is_ok(), "{kind:?} of {models}: {:?}", r.err());
+        }
+    };
+    both(&mut s, json!([model.id]));
+    let copy = run(&mut s, "model.duplicate", json!({ "id": model.id }));
+    both(&mut s, json!([model.id, copy["id"]]));
+}
+
+#[test]
+fn the_simulation_leaves_each_part_its_own_body() {
+    let dir = std::env::temp_dir().join(format!("cosmiccut-bodies-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("brick.stl").to_string_lossy().into_owned();
+    let _ = std::fs::write(&path, box_stl([80.0, 60.0, 100.0]));
+    let mut s = Session::new();
+    run(&mut s, "stock.block", json!({ "width": 400.0, "depth": 200.0, "height": 200.0 }));
+    let id = |v: Value| v["id"].as_str().unwrap_or_default().to_owned();
+    let a = id(run(&mut s, "model.import", json!({ "path": path, "units": "mm", "name": "Left" })));
+    let b = id(run(&mut s, "model.import", json!({ "path": path, "units": "mm", "name": "Right" })));
+    run(&mut s, "model.move", json!({ "id": a, "x": -100.0 }));
+    run(&mut s, "model.move", json!({ "id": b, "x": 100.0 }));
+    // A profile of both, its sides and tops picked, bridged along the floor.
+    let p = json!({ "source": "models", "models": [a, b], "chains": [] });
+    let lines = crate::cut::cut_lines(&s.job.context(), crate::cut::CutKind::Profile, &p).unwrap_or_default();
+    let left = lines.iter().find(|l| !l.bottom && l.points.iter().all(|q| q.x < 0.0)).map_or(0, |l| l.id);
+    let right = lines.iter().find(|l| !l.bottom && l.points.iter().all(|q| q.x > 0.0)).map_or(0, |l| l.id);
+    let mut q = p.clone();
+    q["chains"] = json!([
+        { "lines": crate::cut::chain_of(&lines, left) },
+        { "lines": crate::cut::chain_of(&lines, right) }
+    ]);
+    run(&mut s, "cut.profile", q);
+    let play = |s: &Session| {
+        let mut sim = crate::sim::Sim::new(&s.job.machine, &s.job.stock, &s.job.cuts, &s.job.ops, &s.job.models);
+        sim.seek(sim.duration());
+        let sizes = sim.voxels.as_ref().map(|v| v.piece_sizes()).unwrap_or_default();
+        let wanted = sim
+            .voxels
+            .as_ref()
+            .map(|v| crate::sim::part_cells(v, std::slice::from_ref(&s.job.models[0])).iter().filter(|c| **c).count())
+            .unwrap_or(0);
+        (sizes, wanted)
+    };
+    // Two bodies alike, each holding its brick (one view shapes the outline through the whole
+    // depth of the foam); the waste round them is gone.
+    let (sizes, wanted) = play(&s);
+    assert_eq!(sizes.len(), 2, "{sizes:?}");
+    assert!(sizes[0] == sizes[1] && sizes[0] > wanted, "{sizes:?} vs {wanted}");
+    let before = sizes[0];
+    // The left brick taken off before a second operation slices right through it: it is set
+    // aside, whole, and stays a body of its own.
+    let op2 = id(run(&mut s, "op.add", json!({})));
+    run(&mut s, "op.edit", json!({ "id": op2, "ignore": [a] }));
+    run(&mut s, "op.activate", json!({ "id": op2 }));
+    // The right brick's side view: the wire runs along X, through where the left one stood.
+    let side = json!({ "source": "models", "models": [b], "angle": 90.0, "chains": [] });
+    let lines = crate::cut::cut_lines(&s.job.context(), crate::cut::CutKind::Profile, &side).unwrap_or_default();
+    let first = lines.iter().find(|l| !l.bottom).map_or(0, |l| l.id);
+    let mut q = side.clone();
+    q["chains"] = json!([{ "lines": crate::cut::chain_of(&lines, first) }]);
+    run(&mut s, "cut.profile", q);
+    let (sizes, _) = play(&s);
+    assert!(sizes.contains(&before) && sizes.iter().any(|n| *n < before), "{sizes:?} vs {before}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

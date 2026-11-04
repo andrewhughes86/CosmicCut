@@ -167,6 +167,7 @@ fn view_menu(ui: &mut Ui, session: &Session, panes: &[Pane], requests: &mut Vec<
         ("view_cube", "View cube"),
         ("orientation_triad", "Axes"),
         ("stock", "Stock"),
+        ("origin", "Origin"),
         ("machine", "Turntable, towers and wire"),
         ("rulings", "Rulings across the foam"),
     ] {

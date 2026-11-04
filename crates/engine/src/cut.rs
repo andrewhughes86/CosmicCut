@@ -100,6 +100,8 @@ pub struct Keep {
     /// The cut's move after which the waste falls away.
     pub at: usize,
     pub sweep: Option<Sweep>,
+    /// Its regions are pieces cut free of each other: the simulation keeps them apart.
+    pub apart: bool,
 }
 
 /// The surface a swarf pass swept: at each height the wire's line, and the part on one side of
@@ -252,6 +254,9 @@ pub fn build(cx: &Context<'_>, kind: CutKind, p: &Value) -> EngineResult<Built> 
     // The wire must not touch the models this cut is not making.
     let own: Vec<String> = match kind {
         CutKind::Model => cut_models(cx, p)?.iter().map(|m| m.id.clone()).collect(),
+        CutKind::Profile | CutKind::TwoView if from_models(p)? => {
+            cut_models(cx, p)?.iter().map(|m| m.id.clone()).collect()
+        }
         // A swarf cut keeps its own parts' wire clear of each other itself.
         CutKind::Swarf => crate::swarf::parts_of(cx, p)?.iter().map(|(m, _)| m.id.clone()).collect(),
         _ => Vec::new(),
@@ -376,6 +381,202 @@ pub const LEADS: &[&str] = &["left", "right", "top"];
 pub const KEEPS: &[&str] = &["inside", "outside"];
 pub const DIRECTIONS: &[&str] = &["ccw", "cw"];
 pub const BOTTOMS: &[&str] = &["attached", "through"];
+/// What a profile or two-view cut follows: a shape, or the outline of models.
+pub const SOURCES: &[&str] = &["shape", "models"];
+
+/// Whether a profile or two-view cut follows models' outlines.
+pub fn from_models(p: &Value) -> EngineResult<bool> {
+    Ok(choice(p, "source", SOURCES)? == "models")
+}
+
+/// A line a profile or two-view cut can leave out, where the wire meets it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CutLine {
+    pub id: u32,
+    /// The table angle of its pass.
+    pub b: f64,
+    pub points: Vec<DVec2>,
+    /// A model's bottom: left alone unless the bottom is cut through or it is picked (`bottoms`).
+    pub bottom: bool,
+    /// The loop (or open path) it is part of, in its pass; lines are numbered round it in order.
+    pub ring: usize,
+    pub closed: bool,
+}
+
+/// The chain a click on line `id` picks: the run round its loop of lines all along a model's
+/// bottom or all not, in order.
+pub fn chain_of(lines: &[CutLine], id: u32) -> Vec<u32> {
+    let rows: Vec<(u32, usize, bool, bool)> = lines.iter().map(|l| (l.id, l.ring, l.closed, l.bottom)).collect();
+    crate::outline::chain_at(&rows, id)
+}
+
+/// Whether a profile or two-view picks its lines as chains (every cut made since chains came
+/// in); older cuts cut every line but those they leave out.
+pub fn by_chains(p: &Value) -> bool {
+    p.get("chains").is_some()
+}
+
+/// The lines of one pass of a cut by chains: the models' outline, or the pass's shape placed.
+fn pass_lines(
+    cx: &Context<'_>,
+    c: &Common,
+    kind: CutKind,
+    p: &Value,
+    mesh: Option<&CosmicCut_geom::Mesh>,
+    pass: u32,
+    b: f64,
+) -> EngineResult<Vec<crate::outline::Line>> {
+    if let Some(mesh) = mesh {
+        return Ok(crate::outline::lines(cx, c, mesh, b, pass));
+    }
+    let (key, prefix) = match (kind, pass) {
+        (CutKind::TwoView, 0) => ("front", "front_"),
+        (CutKind::TwoView, _) => ("side", "side_"),
+        _ => ("shape", ""),
+    };
+    let paths = place(cx, cx.shape(p, key)?, p, b, prefix)?;
+    let loops: Vec<Vec<DVec2>> =
+        paths.iter().filter(|q| q.closed && q.points.len() >= 3).map(|q| q.points.clone()).collect();
+    let open: Vec<Vec<DVec2>> =
+        paths.iter().filter(|q| !q.closed || q.points.len() < 3).map(|q| q.points.clone()).collect();
+    Ok(crate::outline::from_paths(cx, c, &loops, &open, pass, false))
+}
+
+/// A profile or two-view by chains: at each pass the chains picked there, in the order picked,
+/// each the way round it is set, with its leads.
+fn chain_profile(cx: &Context<'_>, kind: CutKind, p: &Value) -> EngineResult<Built> {
+    let c = common(cx, p)?;
+    let mesh = if from_models(p)? { Some(merged(&cut_models(cx, p)?)?) } else { None };
+    let angles = pass_angles(kind, p)?;
+    needs_b(cx, &angles)?;
+    let chains = crate::outline::chains(p);
+    if chains.is_empty() {
+        return Err(EngineError::InvalidParams("select the chains to cut: click the outline's lines".into()));
+    }
+    let bridge = params::opt_bool(p, "bridge")?.unwrap_or(true);
+    let leads = (
+        params::opt_f64(p, "lead_in", 0.0, 10_000.0)?.unwrap_or(0.0),
+        params::opt_f64(p, "lead_out", 0.0, 10_000.0)?.unwrap_or(0.0),
+    );
+    let first = angles.first().copied().unwrap_or(0.0);
+    let mut out = Built { path: WirePath::new(park(cx.machine, cx.stock, first)), ..Built::default() };
+    for (k, b) in angles.into_iter().enumerate() {
+        let pass = k as u32;
+        let here: Vec<crate::outline::Chain> = chains
+            .iter()
+            .filter(|ch| ch.lines.first().is_some_and(|id| id / crate::outline::PASS == pass))
+            .cloned()
+            .collect();
+        if here.is_empty() {
+            continue;
+        }
+        let lines = pass_lines(cx, &c, kind, p, mesh.as_deref(), pass, b)?;
+        crate::outline::chain_pass(cx, &c, &lines, &here, bridge, leads, b, &ignored(p), &mut out);
+    }
+    if out.path.moves.is_empty() {
+        return Err(EngineError::InvalidParams("the chains picked are not on the outline any more".into()));
+    }
+    finish(cx, &c, &mut out);
+    check_fits(cx, &mut out);
+    Ok(out)
+}
+
+/// The lines of a profile or two-view cut, every pass, for picking the ones it leaves out.
+pub fn cut_lines(cx: &Context<'_>, kind: CutKind, p: &Value) -> EngineResult<Vec<CutLine>> {
+    let mut out = Vec::new();
+    if by_chains(p) {
+        let c = common(cx, p)?;
+        let mesh = if from_models(p)? { Some(merged(&cut_models(cx, p)?)?) } else { None };
+        for (k, b) in pass_angles(kind, p)?.into_iter().enumerate() {
+            for l in pass_lines(cx, &c, kind, p, mesh.as_deref(), k as u32, b)? {
+                out.push(CutLine { id: l.id, b, points: l.points, bottom: l.bottom, ring: l.ring, closed: l.closed });
+            }
+        }
+        return Ok(out);
+    }
+    if from_models(p)? {
+        let c = common(cx, p)?;
+        let mesh = merged(&cut_models(cx, p)?)?;
+        let through = bottom(p)?.is_none();
+        for (k, b) in pass_angles(kind, p)?.into_iter().enumerate() {
+            for l in crate::outline::lines(cx, &c, &mesh, b, k as u32) {
+                out.push(CutLine {
+                    id: l.id,
+                    b,
+                    points: l.points,
+                    bottom: l.bottom && !through,
+                    ring: l.ring,
+                    closed: l.closed,
+                });
+            }
+        }
+        return Ok(out);
+    }
+    let views: Vec<(&str, &str, u32)> = match kind {
+        CutKind::TwoView => vec![("front", "front_", 0), ("side", "side_", 1)],
+        _ => vec![("shape", "", 0)],
+    };
+    for ((key, prefix, pass), b) in views.into_iter().zip(pass_angles(kind, p)?) {
+        let shape = cx.shape(p, key)?;
+        let at = placing(cx, shape, p, b, prefix)?;
+        for (id, pts) in shape.sketch.as_ref().map(|s| s.curves()).unwrap_or_default() {
+            out.push(CutLine {
+                id: id.saturating_add(pass * crate::outline::PASS),
+                b,
+                points: pts.into_iter().map(|q| at.point(q)).collect(),
+                bottom: false,
+                ring: 0,
+                closed: false,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// The table angles of a profile's passes (its copies), or a two-view's front and side.
+fn pass_angles(kind: CutKind, p: &Value) -> EngineResult<Vec<f64>> {
+    let b0 = angle(p, "angle", 0.0)?;
+    if kind == CutKind::TwoView {
+        return Ok(vec![b0, b0 + 90.0]);
+    }
+    let copies = params::opt_f64(p, "copies", 1.0, 360.0)?.unwrap_or(1.0) as usize;
+    let step = angle(p, "step", if copies > 1 { 360.0 / copies as f64 } else { 0.0 })?;
+    Ok((0..copies.max(1)).map(|k| b0 + step * k as f64).collect())
+}
+
+/// Profiles of models: at each angle the models' outline, the lines left out skipped, the
+/// bottoms left alone unless cut through.
+fn model_profile(cx: &Context<'_>, kind: CutKind, p: &Value) -> EngineResult<Built> {
+    let c = common(cx, p)?;
+    let mesh = merged(&cut_models(cx, p)?)?;
+    let angles = pass_angles(kind, p)?;
+    needs_b(cx, &angles)?;
+    let lead = choice(p, "lead", LEADS)?;
+    let alternate = params::opt_bool(p, "alternate")?.unwrap_or(true);
+    let through = bottom(p)?.is_none();
+    let bridge = params::opt_bool(p, "bridge")?.unwrap_or(true);
+    let start = params::opt_f64(p, "start_x", -1.0e5, 1.0e5)?;
+    let skip = skipped(p);
+    let bottoms = ids(p, "bottoms");
+    let first = angles.first().copied().unwrap_or(0.0);
+    let mut out = Built { path: WirePath::new(park(cx.machine, cx.stock, first)), ..Built::default() };
+    for (k, b) in angles.into_iter().enumerate() {
+        let lines = crate::outline::lines(cx, &c, &mesh, b, k as u32);
+        if lines.is_empty() {
+            return Err(EngineError::InvalidParams("the models have no outline above what the wire reaches".into()));
+        }
+        let (u0, u1) = cx.stock.u_range(b);
+        let right = match start {
+            Some(x) => x > (u0 + u1) / 2.0,
+            None => lead == "right",
+        };
+        let right = right != (alternate && k % 2 == 1);
+        crate::outline::pass(cx, &c, &lines, &skip, &bottoms, through, bridge, b, right, &ignored(p), &mut out)?;
+    }
+    finish(cx, &c, &mut out);
+    check_fits(cx, &mut out);
+    Ok(out)
+}
 
 /// Shared settings of cuts.
 pub(crate) struct Common {
@@ -468,7 +669,20 @@ pub type Curves = Vec<(u32, Vec<DVec2>)>;
 
 /// The curve ids a profile cut leaves out.
 fn skipped(p: &Value) -> Vec<u32> {
-    p.get("skip")
+    ids(p, "skip")
+}
+
+/// The models a cut says are off the table when it runs.
+fn ignored(p: &Value) -> Vec<String> {
+    p.get("ignore")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+/// A list of line ids.
+fn ids(p: &Value, key: &str) -> Vec<u32> {
+    p.get(key)
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_u64).filter_map(|v| u32::try_from(v).ok()).collect())
         .unwrap_or_default()
@@ -524,6 +738,7 @@ fn profile_pass(
             outside: keep_outside,
             at: 0,
             sweep: None,
+            apart: false,
         });
         out.keeps.len() - 1
     });
@@ -697,7 +912,14 @@ fn profile_pass(
         let margin = c.clearance * 2.0 + 10.0;
         let frame = (DVec2::new(u0 - margin, lo_h - margin), DVec2::new(u1 + margin, hi_h + margin));
         if let Some(region) = middle.and_then(|inner| enclosed(&chain, frame, inner)) {
-            out.keeps.push(Keep { b, regions: vec![region], outside: false, at: out.path.moves.len(), sweep: None });
+            out.keeps.push(Keep {
+                b,
+                regions: vec![region],
+                outside: false,
+                at: out.path.moves.len(),
+                sweep: None,
+                apart: false,
+            });
         } else {
             out.warnings
                 .push("an open outline that does not run from outside the foam back to it cuts nothing free".into());
@@ -730,7 +952,7 @@ fn profile_pass(
 
 /// A closed loop with everything below `floor` brought up to it: where an edge crosses the floor
 /// the loop meets it there, and runs along it until it comes back up.
-fn above(l: &[DVec2], floor: f64) -> Vec<DVec2> {
+pub(crate) fn above(l: &[DVec2], floor: f64) -> Vec<DVec2> {
     let mut out: Vec<DVec2> = Vec::with_capacity(l.len() + 4);
     for (a, b) in l.iter().zip(l.iter().cycle().skip(1)) {
         out.push(DVec2::new(a.x, a.y.max(floor)));
@@ -857,7 +1079,7 @@ fn crosses_chain(pts: &[DVec2], at: usize, a: DVec2, b: DVec2) -> bool {
 /// The region `chain` (from outside the stock, through it, back outside) closes off on the side
 /// holding `inner`: the chain, then round the edge of `frame` one way or the other. None if the
 /// ends are not out on the frame's sides or neither way holds `inner`.
-fn enclosed(chain: &[DVec2], frame: (DVec2, DVec2), inner: DVec2) -> Option<Region> {
+pub(crate) fn enclosed(chain: &[DVec2], frame: (DVec2, DVec2), inner: DVec2) -> Option<Region> {
     let (lo, hi) = frame;
     let (s, e) = (*chain.first()?, *chain.last()?);
     // Out to the frame from an end: straight away from the stock on its side.
@@ -915,7 +1137,7 @@ fn enclosed(chain: &[DVec2], frame: (DVec2, DVec2), inner: DVec2) -> Option<Regi
     })
 }
 
-fn argmax(pts: &[DVec2], f: impl Fn(DVec2) -> f64) -> usize {
+pub(crate) fn argmax(pts: &[DVec2], f: impl Fn(DVec2) -> f64) -> usize {
     let mut best = (0usize, f64::NEG_INFINITY);
     for (i, q) in pts.iter().enumerate() {
         let v = f(*q);
@@ -1046,6 +1268,12 @@ pub(crate) fn needs_b(cx: &Context<'_>, angles: &[f64]) -> EngineResult<()> {
 }
 
 fn profile(cx: &Context<'_>, p: &Value) -> EngineResult<Built> {
+    if by_chains(p) {
+        return chain_profile(cx, CutKind::Profile, p);
+    }
+    if from_models(p)? {
+        return model_profile(cx, CutKind::Profile, p);
+    }
     let c = common(cx, p)?;
     let shape = cx.shape(p, "shape")?;
     let b0 = angle(p, "angle", 0.0)?;
@@ -1086,6 +1314,12 @@ fn profile(cx: &Context<'_>, p: &Value) -> EngineResult<Built> {
 }
 
 fn two_view(cx: &Context<'_>, p: &Value) -> EngineResult<Built> {
+    if by_chains(p) {
+        return chain_profile(cx, CutKind::TwoView, p);
+    }
+    if from_models(p)? {
+        return model_profile(cx, CutKind::TwoView, p);
+    }
     let c = common(cx, p)?;
     let front = cx.shape(p, "front")?;
     let side = cx.shape(p, "side")?;
@@ -1094,13 +1328,37 @@ fn two_view(cx: &Context<'_>, p: &Value) -> EngineResult<Built> {
     let direction = choice(p, "direction", DIRECTIONS)?;
     needs_b(cx, &[b0, b0 + 90.0])?;
     let mut out = Built { path: WirePath::new(park(cx.machine, cx.stock, b0)), ..Built::default() };
-    let front_paths = place(cx, front, p, b0, "front_")?;
+    // Lines left out: the front's by their own ids, the side's a pass on.
+    let skip = skipped(p);
+    let view = |shape: &Shape, b: f64, prefix: &str, pass: u32| -> EngineResult<Vec<Path2>> {
+        let own: Vec<u32> = skip
+            .iter()
+            .filter_map(|id| id.checked_sub(pass * crate::outline::PASS))
+            .filter(|id| *id < crate::outline::PASS)
+            .collect();
+        match shape.sketch.as_deref().filter(|_| !own.is_empty()) {
+            Some(sketch) => Ok(placing(cx, shape, p, b, prefix)?.paths(&sketch.paths_without(&own))),
+            None => place(cx, shape, p, b, prefix),
+        }
+    };
+    // The middle of a whole view says which side of what is left the part is on.
+    let middle = |shape: &Shape, b: f64, prefix: &str| -> EngineResult<Option<DVec2>> {
+        let pts: Vec<DVec2> = place(cx, shape, p, b, prefix)?
+            .iter()
+            .filter(|q| q.closed)
+            .flat_map(|q| q.points.iter().copied())
+            .collect();
+        Ok((!pts.is_empty()).then(|| pts.iter().copied().sum::<DVec2>() / pts.len() as f64))
+    };
+    let front_paths = view(front, b0, "front_", 0)?;
     let attach = bottom(p)?;
     let alternate = params::opt_bool(p, "alternate")?.unwrap_or(true);
-    profile_pass(cx, &c, &front_paths, b0, lead, false, direction, attach, None, None, &mut out)?;
-    let side_paths = place(cx, side, p, b0 + 90.0, "side_")?;
+    let mid = middle(front, b0, "front_")?;
+    profile_pass(cx, &c, &front_paths, b0, lead, false, direction, attach, None, mid, &mut out)?;
+    let side_paths = view(side, b0 + 90.0, "side_", 1)?;
     let (lead, direction) = pass_way(lead, direction, alternate);
-    profile_pass(cx, &c, &side_paths, b0 + 90.0, lead, false, direction, attach, None, None, &mut out)?;
+    let mid = middle(side, b0 + 90.0, "side_")?;
+    profile_pass(cx, &c, &side_paths, b0 + 90.0, lead, false, direction, attach, None, mid, &mut out)?;
     if !wants_release(p)? {
         out.release = None;
     }
@@ -1218,6 +1476,7 @@ fn lathe(cx: &Context<'_>, p: &Value) -> EngineResult<Built> {
             outside: true,
             at: out.path.moves.len(),
             sweep: None,
+            apart: false,
         });
         // Back up the outside to above the foam.
         out.path.push(MoveKind::Rapid, WirePos::new(reach, top, b), 0.0);
@@ -1305,6 +1564,7 @@ fn slab(cx: &Context<'_>, p: &Value) -> EngineResult<Built> {
             outside: false,
             at: out.path.moves.len(),
             sweep: None,
+            apart: false,
         });
     }
     let slabs = heights.len() - usize::from(skim > 0.0);

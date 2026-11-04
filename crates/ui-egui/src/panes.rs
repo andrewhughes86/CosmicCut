@@ -16,24 +16,54 @@ use crate::theme::Tokens;
 
 pub fn explorer(ui: &mut Ui, session: &Session, tokens: &Tokens, requests: &mut Vec<Request>) {
     let selection = session.view.selection.as_deref();
+    let chosen = session.selected_ids();
+    let outline = session.outline();
+    // Every row's id, top to bottom, for Shift-click ranges.
+    fn flat(nodes: &[OutlineNode], out: &mut Vec<String>) {
+        for n in nodes {
+            out.push(n.id.clone());
+            flat(&n.children, out);
+        }
+    }
+    let mut rows = Vec::new();
+    flat(&outline, &mut rows);
+    let picked = Picked { selection, chosen: &chosen, rows: &rows };
     let no_drag = egui::scroll_area::ScrollSource {
         drag: egui::scroll_area::DragScroll::Never,
         ..egui::scroll_area::ScrollSource::ALL
     };
     ScrollArea::both().scroll_source(no_drag).auto_shrink([false, false]).show(ui, |ui| {
-        for node in session.outline() {
-            outline_node(ui, &node, session, tokens, selection, requests);
+        for node in &outline {
+            outline_node(ui, node, session, tokens, &picked, requests);
         }
     });
-    // Delete removes the selected cut or shape (when no text field has the keyboard).
+    // Delete removes the selected cuts, models and shapes (when no text field has the keyboard).
     let typing = ui.ctx().memory(|m| m.focused().is_some());
-    if !typing
-        && ui.input(|i| i.key_pressed(egui::Key::Delete))
-        && let Some(id) = selection
-        && let Some(node) = session.selection_node(id)
-        && let Some(command) = delete_command(id)
-    {
-        requests.push(("ui.delete".into(), json!({ "command": command, "id": id, "label": node.label })));
+    if !typing && ui.input(|i| i.key_pressed(egui::Key::Delete)) {
+        requests.extend(delete_request(session, &chosen));
+    }
+}
+
+/// What is selected, for drawing and clicking the rows.
+struct Picked<'a> {
+    selection: Option<&'a str>,
+    chosen: &'a [String],
+    rows: &'a [String],
+}
+
+/// Asking to delete `ids` (those that can be): one item by its own command, several in one step.
+pub fn delete_request(session: &Session, ids: &[String]) -> Option<Request> {
+    let doomed: Vec<&String> = ids.iter().filter(|id| delete_command(id).is_some()).collect();
+    match doomed.as_slice() {
+        [] => None,
+        [one] => {
+            let label = session.selection_node(one).map(|n| n.label).unwrap_or_else(|| (*one).clone());
+            Some(("ui.delete".into(), json!({ "command": delete_command(one), "id": one, "label": label })))
+        }
+        many => {
+            let label = format!("these {} items", many.len());
+            Some(("ui.delete".into(), json!({ "command": "edit.delete", "ids": many, "label": label })))
+        }
     }
 }
 
@@ -86,17 +116,25 @@ fn outline_node(
     node: &OutlineNode,
     session: &Session,
     tokens: &Tokens,
-    selection: Option<&str>,
+    picked: &Picked<'_>,
     requests: &mut Vec<Request>,
 ) {
-    let selected = selection == Some(node.id.as_str());
+    let selected = picked.selection == Some(node.id.as_str()) || picked.chosen.contains(&node.id);
     let row = |ui: &mut Ui, requests: &mut Vec<Request>| {
         match node.visible {
             Some(visible) => {
                 if eye(ui, visible, tokens).clicked() {
-                    let command =
-                        if node.id.starts_with("model.") { "model.visibility.set" } else { "cut.visibility.set" };
-                    requests.push((command.into(), json!({ "id": node.id, "visible": !visible })));
+                    match node.id.as_str() {
+                        // The stock and the origin are display settings.
+                        STOCK_ID | ORIGIN_ID => {
+                            requests.push(("view.display.set".into(), json!({ node.id.as_str(): !visible })));
+                        }
+                        id => {
+                            let command =
+                                if id.starts_with("model.") { "model.visibility.set" } else { "cut.visibility.set" };
+                            requests.push((command.into(), json!({ "id": id, "visible": !visible })));
+                        }
+                    }
                 }
             }
             None => ui.add_space(18.0),
@@ -110,12 +148,43 @@ fn outline_node(
             if node.problem { RichText::new(&node.label).color(tokens.warning) } else { RichText::new(&node.label) };
         let response = ui.selectable_label(selected, text);
         if response.clicked() {
-            requests.push(("selection.set".into(), json!({ "id": node.id })));
+            let (ctrl, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
+            let from = picked.selection.and_then(|s| picked.rows.iter().position(|r| r == s));
+            let to = picked.rows.iter().position(|r| *r == node.id);
+            let params = match (shift, from, to) {
+                // Shift: every row from the one selected to this one.
+                (true, Some(a), Some(b)) => {
+                    let range: Vec<&String> = picked.rows.get(a.min(b)..=a.max(b)).unwrap_or_default().iter().collect();
+                    json!({ "id": node.id, "ids": range, "add": true })
+                }
+                _ if ctrl || shift => json!({ "id": node.id, "add": true }),
+                _ => json!({ "id": node.id }),
+            };
+            requests.push(("selection.set".into(), params));
         }
         if response.double_clicked() {
             requests.extend(open(&node.id, session));
         }
-        context_menu(&response, node, session, tokens, requests);
+        context_menu(&response, node, session, tokens, picked, requests);
+        // A cut can be dragged to another place in the order, or into another operation.
+        if node.id.starts_with("cut.") {
+            let response = response.interact(egui::Sense::drag());
+            response.dnd_set_drag_payload(CutDrag(node.id.clone()));
+            if response.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                // The cut's name follows the pointer.
+                if let Some(at) = ui.ctx().pointer_interact_pos() {
+                    let painter =
+                        ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, ui.id().with("drag")));
+                    let galley =
+                        painter.layout_no_wrap(node.label.clone(), egui::FontId::proportional(13.0), tokens.text);
+                    let r = Rect::from_min_size(at + vec2(14.0, 6.0), galley.size()).expand(5.0);
+                    painter.rect(r, 4.0, tokens.raised_bg, Stroke::new(1.0, tokens.accent), egui::StrokeKind::Inside);
+                    painter.galley(r.min + vec2(5.0, 5.0), galley, tokens.text);
+                }
+            }
+        }
+        drop_target(ui, node, session, tokens, requests);
     };
     if node.children.is_empty() {
         ui.horizontal(|ui| row(ui, requests));
@@ -124,9 +193,57 @@ fn outline_node(
     let id = ui.make_persistent_id(("outline", &node.id));
     CollapsingState::load_with_default_open(ui.ctx(), id, true).show_header(ui, |ui| row(ui, requests)).body(|ui| {
         for child in &node.children {
-            outline_node(ui, child, session, tokens, selection, requests);
+            outline_node(ui, child, session, tokens, picked, requests);
         }
     });
+}
+
+/// A cut being dragged in the explorer.
+struct CutDrag(String);
+
+/// A cut dropped on this row: on a cut, before it (top half) or after it (bottom half), in its
+/// operation; on an operation, last in it. A line shows where it will go.
+fn drop_target(ui: &Ui, node: &OutlineNode, session: &Session, tokens: &Tokens, requests: &mut Vec<Request>) {
+    let Some(drag) = egui::DragAndDrop::payload::<CutDrag>(ui.ctx()) else { return };
+    let on_cut = node.id.starts_with("cut.");
+    if !(on_cut || node.id.starts_with("op.")) {
+        return;
+    }
+    let content = ui.min_rect();
+    let rect = Rect::from_x_y_ranges(ui.max_rect().x_range(), content.y_range());
+    let Some(at) = ui.ctx().pointer_hover_pos().filter(|p| rect.contains(*p)) else { return };
+    let cuts = &session.job.cuts;
+    let (op, before, line_y) = if on_cut {
+        let Some(k) = cuts.iter().position(|c| c.id == node.id) else { return };
+        let op = cuts.get(k).map(|c| c.op.clone()).unwrap_or_default();
+        if at.y < rect.center().y {
+            (op, Some(node.id.clone()), rect.top())
+        } else {
+            // Before the next cut of the same operation (none: last in it).
+            let next = cuts.iter().skip(k + 1).find(|c| c.op == op).map(|c| c.id.clone());
+            (op, next, rect.bottom())
+        }
+    } else {
+        (node.id.clone(), None, rect.bottom())
+    };
+    // Dropping it where it already is changes nothing.
+    if before.as_deref() == Some(drag.0.as_str()) {
+        return;
+    }
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, ui.id().with("drop")));
+    if on_cut {
+        painter.hline(rect.x_range(), line_y, Stroke::new(2.0, tokens.accent));
+    } else {
+        painter.rect_stroke(rect, 3.0, Stroke::new(1.5, tokens.accent), egui::StrokeKind::Inside);
+    }
+    if ui.input(|i| i.pointer.any_released()) {
+        let mut params = json!({ "id": drag.0, "op": op });
+        if let Some(b) = before {
+            params["before"] = json!(b);
+        }
+        requests.push(("cut.place".into(), params));
+        egui::DragAndDrop::clear_payload(ui.ctx());
+    }
 }
 
 /// What double-clicking a row does.
@@ -165,9 +282,19 @@ fn context_menu(
     node: &OutlineNode,
     session: &Session,
     tokens: &Tokens,
+    picked: &Picked<'_>,
     requests: &mut Vec<Request>,
 ) {
     let id = node.id.as_str();
+    // Delete on a row that is one of several selected deletes them all.
+    let delete = || -> Vec<Request> {
+        let ids: Vec<String> = if picked.chosen.len() > 1 && picked.chosen.iter().any(|c| c == id) {
+            picked.chosen.to_vec()
+        } else {
+            vec![id.to_owned()]
+        };
+        delete_request(session, &ids).into_iter().collect()
+    };
     crate::ui_kit::Menu::below(row).context(tokens, |ui| {
         ui.set_min_width(180.0);
         let mut item = |ui: &mut Ui, label: &str, run: Vec<Request>| {
@@ -194,7 +321,7 @@ fn context_menu(
             item(ui, "Cut earlier", one("cut.move.up", json!({ "id": id })));
             item(ui, "Cut later", one("cut.move.down", json!({ "id": id })));
             ui.separator();
-            item(ui, "Delete", one("ui.delete", json!({ "command": "cut.remove", "id": id, "label": node.label })));
+            item(ui, "Delete", delete());
         } else if id.starts_with("model.") {
             item(ui, "Lay flat…", one("model.lay_flat", json!({ "id": id })));
             item(ui, "Scale…", one("ui.form", json!({ "command": "model.scale", "id": id })));
@@ -203,9 +330,12 @@ fn context_menu(
             item(ui, "Duplicate", one("model.duplicate", json!({ "id": id })));
             ui.separator();
             item(ui, "Cut from model…", one("ui.cut.new", json!({ "kind": "model", "models": [id] })));
+            for (kind, label) in [("profile", "Profile of model…"), ("twoview", "Two-view of model…")] {
+                item(ui, label, one("ui.cut.new", json!({ "kind": kind, "source": "models", "models": [id] })));
+            }
             ui.separator();
             item(ui, "Fit stock to model", one("stock.fit", json!({ "model": id })));
-            item(ui, "Delete", one("ui.delete", json!({ "command": "model.remove", "id": id, "label": node.label })));
+            item(ui, "Delete", delete());
         } else if id.starts_with("shape.") {
             if is_sketch(session, id) {
                 item(ui, "Edit sketch", one("sketch.edit", json!({ "id": id })));
@@ -222,7 +352,7 @@ fn context_menu(
             ui.separator();
             item(ui, "Transform…", one("ui.form", json!({ "command": "shape.transform", "id": id })));
             item(ui, "Rename…", one("ui.rename", json!({ "command": "shape.rename", "id": id, "name": node.label })));
-            item(ui, "Delete", one("ui.delete", json!({ "command": "shape.remove", "id": id, "label": node.label })));
+            item(ui, "Delete", delete());
         } else {
             match id {
                 "job" => {

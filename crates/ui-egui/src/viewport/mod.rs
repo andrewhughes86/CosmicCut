@@ -17,7 +17,7 @@ use CosmicCut_engine::wire::WirePos;
 use CosmicCut_engine::{Display, Session, Theme};
 use CosmicCut_geom::{Aabb, Vec3};
 use CosmicCut_render::{OrbitCamera, SceneGeometry, TriadStyle};
-use egui::{Color32, Pos2, Rect, RichText, Sense, Ui, pos2, vec2};
+use egui::{Color32, Pos2, Rect, RichText, Sense, Ui, Vec2, pos2, vec2};
 use serde_json::{Value, json};
 
 use crate::Request;
@@ -29,13 +29,19 @@ use crate::ui_kit::{Container, Surface};
 /// simulating, preview, paths hidden.
 /// What the uploaded scene was built from; the last, whether the view looks up from under the
 /// table (the turntable is then see-through, so faces underneath can be picked).
-type SceneKey = (Theme, u64, Display, bool, Option<String>, bool, usize, bool, bool);
+type SceneKey = (Theme, u64, Display, bool, Vec<String>, bool, usize, bool, bool, bool);
 
 pub struct Viewport {
     /// The cut being set up in the cut panel, drawn over the scene; set by the app each frame.
     pub preview: Option<Built>,
     /// The stock is being set up: no cut paths, and its dimensions drawn and editable.
     pub stock_edit: bool,
+    /// A profile is being set up: the models drawn see-through, so its outline shows.
+    pub ghost_models: bool,
+    /// A cut is being made or changed: the other cuts' paths are not drawn.
+    pub cut_open: bool,
+    /// The table angle the cut being set up runs at: the table is drawn turned to it.
+    pub cut_angle: Option<f64>,
     /// New sketch was clicked: the planes are shown to pick one from.
     pub picking_plane: bool,
     /// What to do next in the viewport, for the Instructions tab.
@@ -80,7 +86,10 @@ pub struct Viewport {
     /// points in the cut plane, left out), whether picking; set by the app each frame. The line
     /// clicked, and Esc, go back the same way.
     pub line_pick: Option<LinePick>,
-    pub picked_line: Option<u32>,
+    /// A line clicked while picking chains, and whether Alt was held (that line alone).
+    pub picked_line: Option<(u32, bool)>,
+    /// A chain's direction arrow clicked.
+    pub picked_arrow: Option<usize>,
     pub stop_line_pick: bool,
     /// The faces a click would pick now: (model, face under the pointer, Alt held, the faces).
     hover_surface: Option<(String, usize, bool, Vec<usize>)>,
@@ -128,7 +137,11 @@ impl Viewport {
             stop_face_pick: false,
             hover_surface: None,
             line_pick: None,
+            ghost_models: false,
+            cut_open: false,
+            cut_angle: None,
             picked_line: None,
+            picked_arrow: None,
             stop_line_pick: false,
             moving: None,
             gizmo: gizmo::Gizmo::default(),
@@ -205,7 +218,7 @@ impl Viewport {
             self.shown = cam;
         }
         self.animate(ui, session);
-        self.table_b = session.sim.as_deref().map_or(0.0, |s| s.wire().b);
+        self.table_b = session.sim.as_deref().map(|s| s.wire().b).or(self.cut_angle).unwrap_or(0.0);
         self.pick_face(ui, &response, rect, session, requests);
         self.update_highlight(session, tokens);
         self.update_foam(ui, session, tokens);
@@ -341,7 +354,7 @@ impl Viewport {
                 && self.pick_start.is_none()
                 && self.lay_flat.is_none()
                 && !self.face_pick.as_ref().is_some_and(|(_, on)| *on)
-                && self.line_pick.is_none()
+                && !self.line_pick.as_ref().is_some_and(|p| p.picking)
                 && !grab;
             if free && response.clicked_by(egui::PointerButton::Primary) {
                 let hit = response.interact_pointer_pos().and_then(|p| self.ray(rect, p)).and_then(|(o, d)| {
@@ -354,7 +367,11 @@ impl Viewport {
                         .min_by(|a, b| a.0.total_cmp(&b.0))
                         .map(|(_, id)| id)
                 });
-                if hit.is_some() || session.view.selection.as_deref().is_some_and(|s| s.starts_with("model.")) {
+                // Ctrl or Shift adds the model to what is selected (or takes it away).
+                let add = ui.input(|i| i.modifiers.command || i.modifiers.shift);
+                if add && hit.is_some() {
+                    requests.push(("selection.set".into(), json!({ "id": hit, "add": true })));
+                } else if hit.is_some() || session.view.selection.as_deref().is_some_and(|s| s.starts_with("model.")) {
                     requests.push(("selection.set".into(), json!({ "id": hit })));
                 }
                 if let Some(id) = &hit
@@ -363,21 +380,36 @@ impl Viewport {
                     self.moving = Some(id.clone());
                 }
             }
-            if let Some((b, lines, true)) = &self.line_pick {
-                instructions = "Leave out lines: click a line of the shape to leave it out of the cut (dashed), or \
-                                click a dashed one to put it back. Pick the start point (Path) to say which end the \
-                                wire starts from.\nEsc or right-click when done."
-                    .to_owned();
-                let to_screen = |q: &glam::DVec2| {
-                    let p = CosmicCut_engine::wire::on_wire(&CosmicCut_engine::wire::WirePos::new(q.x, q.y, *b), 0.0);
+            if let Some(pick) = &self.line_pick {
+                if pick.picking {
+                    instructions = "Click lines of the outline one at a time: a line meeting the end of the chain being \
+                                    picked carries it on, any other starts a new chain (Alt-click: a whole run). Click a \
+                                    picked line to take it out. Click a chain's arrow to cut it the other way. Dotted \
+                                    lines are models' bottoms."
+                        .to_owned();
+                }
+                let to_screen = |q: &glam::DVec2, b: f64| {
+                    let p = CosmicCut_engine::wire::on_wire(&CosmicCut_engine::wire::WirePos::new(q.x, q.y, b), 0.0);
                     self.project(rect, p.as_vec3())
                 };
-                let screen: Vec<(u32, Vec<Pos2>, bool)> = lines
+                let screen: Vec<(u32, Vec<Pos2>, LineState)> = pick
+                    .lines
                     .iter()
-                    .map(|(id, pts, out)| (*id, pts.iter().filter_map(to_screen).collect(), *out))
+                    .map(|(id, b, pts, state)| (*id, pts.iter().filter_map(|q| to_screen(q, *b)).collect(), *state))
                     .collect();
-                let pointer = response.hover_pos();
-                let near = pointer.and_then(|p| {
+                let arrows: Vec<(usize, Pos2, Vec2)> = pick
+                    .arrows
+                    .iter()
+                    .filter_map(|(chain, b, at, along)| {
+                        let tip = to_screen(&(*at + *along), *b)?;
+                        let c = to_screen(at, *b)?;
+                        Some((*chain, c, (tip - c).normalized()))
+                    })
+                    .collect();
+                let pointer = response.hover_pos().filter(|_| pick.picking);
+                let arrow_hit =
+                    pointer.and_then(|p| arrows.iter().find(|(_, c, _)| c.distance(p) < 13.0).map(|(k, _, _)| *k));
+                let near = pointer.filter(|_| arrow_hit.is_none()).and_then(|p| {
                     screen
                         .iter()
                         .map(|(id, pts, _)| {
@@ -395,22 +427,29 @@ impl Viewport {
                         .map(|(id, _)| id)
                 });
                 let painter = ui.painter_at(rect);
-                for (id, pts, out) in &screen {
+                for (id, pts, state) in &screen {
                     let lit = near == Some(*id);
-                    let colour = match (out, lit) {
-                        (_, true) => tokens.warning,
-                        (true, false) => tokens.text_muted,
-                        (false, false) => tokens.accent,
+                    let active = matches!(state, LineState::Chosen(k) if pick.active == Some(*k));
+                    let colour = match state {
+                        _ if lit => tokens.warning,
+                        LineState::Chosen(_) if active => crate::theme::PICKED_ACTIVE,
+                        LineState::Chosen(_) => crate::theme::PICKED,
+                        LineState::Free => tokens.text,
+                        LineState::Bottom => tokens.text_muted,
                     };
-                    let width = if lit { 4.0 } else { 2.5 };
-                    if *out {
+                    let width: f32 = match state {
+                        LineState::Chosen(_) => 3.5,
+                        _ if lit => 3.0,
+                        _ => 2.0,
+                    };
+                    if *state == LineState::Bottom && !lit {
                         for w in pts.windows(2) {
                             if let [a, c] = w {
                                 painter.add(egui::Shape::dashed_line(
                                     &[*a, *c],
-                                    egui::Stroke::new(width, colour),
-                                    6.0,
-                                    5.0,
+                                    egui::Stroke::new(1.6, colour),
+                                    2.0,
+                                    4.0,
                                 ));
                             }
                         }
@@ -418,13 +457,37 @@ impl Viewport {
                         painter.add(egui::Shape::line(pts.clone(), egui::Stroke::new(width, colour)));
                     }
                 }
-                if near.is_some() {
+                // Each chain's arrow: a filled head the way the wire goes along it.
+                for (k, c, dir) in &arrows {
+                    let lit = arrow_hit == Some(*k);
+                    let colour = if lit {
+                        tokens.warning
+                    } else if pick.active == Some(*k) {
+                        crate::theme::PICKED_ACTIVE
+                    } else {
+                        crate::theme::PICKED
+                    };
+                    let side = vec2(-dir.y, dir.x);
+                    let tip = *c + *dir * 11.0;
+                    let back = *c - *dir * 7.0;
+                    painter.circle_filled(*c, 12.0, tokens.panel_bg.gamma_multiply(0.85));
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![tip, back + side * 7.0, back - side * 7.0],
+                        colour,
+                        egui::Stroke::NONE,
+                    ));
+                }
+                if near.is_some() || arrow_hit.is_some() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
-                if response.clicked_by(egui::PointerButton::Primary) {
-                    self.picked_line = near;
+                if pick.picking && response.clicked_by(egui::PointerButton::Primary) {
+                    if let Some(k) = arrow_hit {
+                        self.picked_arrow = Some(k);
+                    } else if let Some(id) = near {
+                        self.picked_line = Some((id, ui.input(|i| i.modifiers.alt)));
+                    }
                 }
-                if response.secondary_clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                if pick.picking && (response.secondary_clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape))) {
                     self.stop_line_pick = true;
                 }
             }
@@ -452,9 +515,17 @@ impl Viewport {
         if self.lay_flat.is_some() {
             lay_flat_hint(ui, rect, tokens);
         } else if session.sim.is_some() {
+            exit_simulation(ui, rect, tokens, requests);
             playback(ui, rect, session, tokens, requests);
-        } else if session.job.cuts.is_empty() && session.view.sketch.is_none() && !self.picking_plane {
+        } else if session.job.cuts.is_empty()
+            && session.view.sketch.is_none()
+            && !self.picking_plane
+            && self.line_pick.is_none()
+        {
             hint(ui, rect, session, tokens);
+        }
+        if display.origin && session.view.sketch.is_none() {
+            self.paint_origin(&painter, rect, session, tokens);
         }
         if display.orientation_triad {
             overlay::paint_triad(&painter, overlay::triad_anchor(rect), &self.shown, tokens);
@@ -481,11 +552,12 @@ impl Viewport {
             session.job.revision,
             display,
             inch,
-            session.view.selection.clone(),
+            session.selected_ids(),
             simulating,
             preview_id,
-            self.stock_edit,
+            self.stock_edit || self.cut_open,
             self.shown.eye().z < -0.6,
+            self.ghost_models,
         );
         if self.scene_key.as_ref() == Some(&key) {
             return;
@@ -500,10 +572,11 @@ impl Viewport {
         }
         // Models (before the see-through stock, which would hide them), with their outline
         // where the mesh is small enough to work it out quickly.
-        // The selected one tinted, its edges in the accent.
+        // The selected ones tinted, their edges in the accent.
         let accent = theme::linear(tokens.accent);
+        let chosen = &key.4;
         for m in job.models.iter().filter(|m| m.visible && !simulating) {
-            let picked = session.view.selection.as_deref() == Some(m.id.as_str());
+            let picked = chosen.contains(&m.id);
             let edge = if picked { accent } else { palette.part_edge };
             let edges = (m.mesh.triangles().len() < 300_000).then_some(edge);
             let fill = if picked {
@@ -517,6 +590,8 @@ impl Viewport {
             } else {
                 palette.part
             };
+            // See-through while a profile is set up.
+            let fill = if key.9 { [fill[0], fill[1], fill[2], fill[3] * 0.18] } else { fill };
             content.push_mesh(&m.mesh, fill, edges);
         }
         if display.stock && !simulating {
@@ -528,11 +603,11 @@ impl Viewport {
             scene::turntable(&mut content, job.machine.table_radius as f32, faint, palette.grid_major);
         }
         // The cut paths: those shown, the selected one bold; the preview over them.
-        let selected = session.view.selection.as_deref();
+        let is_chosen = |id: &str| chosen.iter().any(|c| c == id);
         // While simulating, the foam stands in for the stock and the paths.
         let previewing = self.preview.is_some();
         // While the stock is set up, no paths at all: just the stock and the models.
-        let hidden = self.stock_edit;
+        let hidden = self.stock_edit || self.cut_open;
         // What the machine does, as the simulation plays it and the post writes it: the program,
         // from home to each cut, between them, the part-off and home again, in pieces by cut.
         if !previewing && !simulating && !hidden {
@@ -552,15 +627,15 @@ impl Viewport {
                 }
                 at = m.to;
             }
-            let cut_selected = selected.is_some_and(|s| s.starts_with("cut."));
+            let cut_selected = chosen.iter().any(|s| s.starts_with("cut."));
             let dim = |c: [f32; 4]| [c[0], c[1], c[2], c[3] * 0.35];
             for (owner, parting, path) in &pieces {
                 let cut = owner.and_then(|ci| job.cuts.get(ci));
                 // A hidden cut is left out; the moves between cuts show with the rest.
-                if cut.is_some_and(|c| !c.visible && selected != Some(c.id.as_str())) {
+                if cut.is_some_and(|c| !c.visible && !is_chosen(&c.id)) {
                     continue;
                 }
-                let bold = cut.is_some_and(|c| selected == Some(c.id.as_str()));
+                let bold = cut.is_some_and(|c| is_chosen(&c.id));
                 let mut p = palette;
                 if *parting && (bold || !cut_selected) {
                     // The part-off, in red.
@@ -572,11 +647,11 @@ impl Viewport {
                     p.path_rapid = dim(p.path_rapid);
                     p.path_link = dim(p.path_link);
                 }
-                let rulings = display.rulings && cut.is_some() && !*parting && (bold || selected.is_none());
+                let rulings = display.rulings && cut.is_some() && !*parting && (bold || chosen.is_empty());
                 scene::path(&mut content, path, &job.stock, &p, rulings, bold);
             }
         }
-        if let Some(b) = self.preview.as_ref().filter(|_| !hidden) {
+        if let Some(b) = self.preview.as_ref().filter(|_| !self.stock_edit) {
             scene::path(&mut content, &b.path, &job.stock, &palette, display.rulings, true);
             if let Some(rel) = &b.release {
                 let mut red = palette;
@@ -766,6 +841,45 @@ impl Viewport {
     }
 
     /// Where table-frame point `p` is drawn on screen.
+    /// The program's X0 Y0, in the plane the wire cuts in: a dot, X along the wire's travel
+    /// across and Y up.
+    fn paint_origin(&self, painter: &egui::Painter, rect: Rect, session: &Session, tokens: &Tokens) {
+        use CosmicCut_engine::machine::Origin;
+        use CosmicCut_engine::wire::{WirePos, on_wire};
+        let m = &session.job.machine;
+        let (u, h) = match session.job.origin {
+            Origin::Machine => (-m.table_x, m.wire_y0),
+            Origin::Table => (0.0, 0.0),
+        };
+        let b = self.table_b;
+        let at = |du: f64, dh: f64| self.project(rect, on_wire(&WirePos::new(u + du, h + dh, b), 0.0).as_vec3());
+        let (Some(o), Some(x), Some(y)) = (at(0.0, 0.0), at(1.0, 0.0), at(0.0, 1.0)) else { return };
+        let len = 34.0;
+        for (to, colour, name) in [(x, tokens.axis_x, "X"), (y, tokens.axis_z, "Y")] {
+            let dir = (to - o).normalized();
+            if !dir.x.is_finite() {
+                continue;
+            }
+            let tip = o + dir * len;
+            painter.line_segment([o, tip], egui::Stroke::new(2.5, colour));
+            let side = vec2(-dir.y, dir.x);
+            painter.add(egui::Shape::convex_polygon(
+                vec![tip + dir * 7.0, tip + side * 4.5, tip - side * 4.5],
+                colour,
+                egui::Stroke::NONE,
+            ));
+            painter.text(tip + dir * 16.0, egui::Align2::CENTER_CENTER, name, egui::FontId::proportional(12.0), colour);
+        }
+        painter.circle(o, 5.0, tokens.panel_bg, egui::Stroke::new(2.0, tokens.text));
+        painter.text(
+            o + vec2(8.0, 10.0),
+            egui::Align2::LEFT_TOP,
+            "X0 Y0",
+            egui::FontId::proportional(11.0),
+            tokens.text_muted,
+        );
+    }
+
     fn project(&self, rect: Rect, p: Vec3) -> Option<Pos2> {
         let cam = table_camera(&self.shown, self.table_b);
         let radius = self.scene_bounds.radius() + cam.target.distance(self.scene_bounds.center());
@@ -987,6 +1101,29 @@ fn view_tools(ui: &Ui, viewport: Rect, session: &Session, tokens: &Tokens, reque
     }
 }
 
+/// The way back from the simulation, top centre of the viewport.
+fn exit_simulation(ui: &mut Ui, viewport: Rect, tokens: &Tokens, requests: &mut Vec<Request>) {
+    let at = Rect::from_center_size(pos2(viewport.center().x, viewport.top() + 26.0), vec2(150.0, 30.0));
+    // Drawn by hand so the label sits in the middle; purple, like the stock.
+    let response = ui.interact(at, ui.id().with("exit-simulation"), Sense::click());
+    let fill = if response.hovered() { tokens.stock.gamma_multiply(0.85) } else { tokens.stock };
+    let painter = ui.painter_at(at.expand(2.0));
+    painter.rect_filled(at, 6.0, fill);
+    painter.text(
+        at.center(),
+        egui::Align2::CENTER_CENTER,
+        "Exit simulation",
+        egui::FontId::proportional(14.0),
+        crate::ui_kit::ink_on(tokens.stock),
+    );
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if response.on_hover_text("Close the simulation and go back to the job").clicked() {
+        requests.push(("sim.stop".into(), Value::Null));
+    }
+}
+
 /// What to do first, over an empty job.
 fn hint(ui: &mut Ui, viewport: Rect, session: &Session, tokens: &Tokens) {
     let text = if session.job.shapes.is_empty() {
@@ -1149,9 +1286,29 @@ fn trim(v: f64) -> String {
 /// A swarf cut's faces by model (id, face numbers), and whether more are being picked.
 pub type FacePick = (Vec<(String, Vec<usize>)>, bool);
 
-/// A profile's lines while picking: the table angle, each line (id, points in the cut plane,
-/// left out), and whether picking.
-pub type LinePick = (f64, Vec<(u32, Vec<glam::DVec2>, bool)>, bool);
+/// What a line of a profile's outline is to the cut.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineState {
+    /// Not in a chain.
+    Free,
+    /// A model's bottom, in no chain.
+    Bottom,
+    /// In chain number n.
+    Chosen(usize),
+}
+
+/// A profile's outline while its chains are picked.
+#[derive(Clone, Debug, Default)]
+pub struct LinePick {
+    /// Each line: id, table angle, points in the cut plane, state.
+    pub lines: Vec<(u32, f64, Vec<glam::DVec2>, LineState)>,
+    /// Each chain's direction: chain, table angle, where the arrow sits, the way it points.
+    pub arrows: Vec<(usize, f64, glam::DVec2, glam::DVec2)>,
+    /// The chain picked out in the panel.
+    pub active: Option<usize>,
+    /// Clicks pick chains.
+    pub picking: bool,
+}
 
 /// Distance from `p` to the segment `a`–`b`, points.
 fn segment_distance(p: Pos2, a: Pos2, b: Pos2) -> f32 {

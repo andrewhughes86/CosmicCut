@@ -60,6 +60,11 @@ const fn hex(rgb: u32) -> Color32 {
     Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
 }
 
+/// Lines picked for a cut (chains of a profile), the same in both themes.
+pub const PICKED: Color32 = hex(0x6A06D3);
+/// The chain picked out in the panel: a lighter purple.
+pub const PICKED_ACTIVE: Color32 = hex(0x9D4BFF);
+
 /// Modern dark (default): deep slate with electric blue / cyan accents.
 pub const DARK: Tokens = Tokens {
     dark: true,

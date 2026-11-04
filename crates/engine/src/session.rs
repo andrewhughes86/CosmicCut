@@ -47,6 +47,8 @@ pub struct Display {
     pub view_cube: bool,
     pub orientation_triad: bool,
     pub stock: bool,
+    /// A marker where the program's X0 Y0 is.
+    pub origin: bool,
     /// The turntable, towers and wire.
     pub machine: bool,
     /// Lines across the foam showing where the wire lies along a cut.
@@ -56,7 +58,7 @@ pub struct Display {
 
 impl Display {
     pub const KEYS: &'static [&'static str] =
-        &["grid", "view_cube", "orientation_triad", "stock", "machine", "rulings", "readout"];
+        &["grid", "view_cube", "orientation_triad", "stock", "origin", "machine", "rulings", "readout"];
 
     pub fn get(&self, key: &str) -> Option<bool> {
         Some(match key {
@@ -64,6 +66,7 @@ impl Display {
             "view_cube" => self.view_cube,
             "orientation_triad" => self.orientation_triad,
             "stock" => self.stock,
+            "origin" => self.origin,
             "machine" => self.machine,
             "rulings" => self.rulings,
             "readout" => self.readout,
@@ -77,6 +80,7 @@ impl Display {
             "view_cube" => &mut self.view_cube,
             "orientation_triad" => &mut self.orientation_triad,
             "stock" => &mut self.stock,
+            "origin" => &mut self.origin,
             "machine" => &mut self.machine,
             "rulings" => &mut self.rulings,
             "readout" => &mut self.readout,
@@ -98,6 +102,7 @@ impl Default for Display {
             view_cube: true,
             orientation_triad: true,
             stock: true,
+            origin: true,
             machine: true,
             rulings: true,
             readout: false,
@@ -244,6 +249,9 @@ pub struct ViewState {
     pub layout_generation: u64,
     /// The selected explorer item's id.
     pub selection: Option<String>,
+    /// Everything selected with Ctrl or Shift held, `selection` among them; ignored when it
+    /// does not hold `selection` (see [`Session::selected_ids`]).
+    pub selected: Vec<String>,
     /// The sketch being drawn (a shape's id), the tool in use on it, and its selected items.
     pub sketch: Option<String>,
     pub sketch_tool: &'static str,
@@ -258,6 +266,7 @@ impl Default for ViewState {
             aspect: 1.6,
             layout_generation: 0,
             selection: None,
+            selected: Vec::new(),
             sketch: None,
             sketch_tool: "select",
             sketch_selection: Vec::new(),
@@ -673,6 +682,15 @@ impl Session {
             .unwrap_or_else(|_| Err(EngineError::Internal("the preview failed".into())))
     }
 
+    /// Every selected item's id: those picked with Ctrl or Shift, else the one selected.
+    pub fn selected_ids(&self) -> Vec<String> {
+        let Some(sel) = &self.view.selection else { return Vec::new() };
+        if !self.view.selected.contains(sel) {
+            return vec![sel.clone()];
+        }
+        self.view.selected.iter().filter(|id| self.selection_node(id).is_some()).cloned().collect()
+    }
+
     /// The explorer's tree.
     pub fn outline(&self) -> Vec<OutlineNode> {
         let units = self.prefs.units;
@@ -688,6 +706,7 @@ impl Session {
             id: ORIGIN_ID.into(),
             label: format!("Origin: {}", job.origin.label()),
             properties: vec![("Program X0 Y0".into(), job.origin.describe().into())],
+            visible: Some(self.prefs.display.origin),
             icon: Some("job_origin"),
             ..Default::default()
         };
@@ -695,6 +714,7 @@ impl Session {
             id: STOCK_ID.into(),
             label: format!("Stock: {}", job.stock.describe(units)),
             properties: job.stock.properties(units),
+            visible: Some(self.prefs.display.stock),
             icon: Some("stock_block"),
             ..Default::default()
         };

@@ -60,16 +60,50 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         placement: None,
         icon: None,
         shortcut: None,
-        params: &[Param::optional("id", ParamKind::Str, "Item id, e.g. cut.3; omit to clear")],
-        returns: "{\"selection\": id or null}",
+        params: &[
+            Param::optional("id", ParamKind::Str, "Item id, e.g. cut.3; omit to clear"),
+            Param::optional(
+                "add",
+                ParamKind::Bool,
+                "Keep what is selected and add the item, or take it away if it is selected (Ctrl-click)",
+            ),
+            Param::optional(
+                "ids",
+                ParamKind::StrList { max: 10_000 },
+                "Select these items too, with `id` (Shift-click: the rows from the last one selected)",
+            ),
+        ],
+        returns: "{\"selection\": id or null, \"selected\": [ids]}",
         enabled: always,
         run: |s, p| {
-            let id = params::opt_str(p, "id")?.map(str::to_owned);
-            if let Some(id) = &id
-                && s.selection_node(id).is_none()
-            {
-                return Err(EngineError::InvalidParams(format!("nothing has the id `{id}`")));
+            let mut id = params::opt_str(p, "id")?.map(str::to_owned);
+            let extra: Vec<String> = p
+                .get("ids")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                .unwrap_or_default();
+            for i in id.iter().chain(&extra) {
+                if s.selection_node(i).is_none() {
+                    return Err(EngineError::InvalidParams(format!("nothing has the id `{i}`")));
+                }
             }
+            let mut all = if params::opt_bool(p, "add")?.unwrap_or(false) { s.selected_ids() } else { Vec::new() };
+            match &id {
+                Some(i) if all.contains(i) && extra.is_empty() => {
+                    // Ctrl-click on a selected item lets it go.
+                    all.retain(|x| x != i);
+                    id = all.last().cloned();
+                }
+                Some(i) => {
+                    for x in extra.iter().chain(std::iter::once(i)) {
+                        if !all.contains(x) {
+                            all.push(x.clone());
+                        }
+                    }
+                }
+                None => all.clear(),
+            }
+            s.view.selected = all;
             // Selecting an operation, or a cut in one, makes it the one new cuts go into.
             if let Some(id) = &id {
                 let op = if s.job.op_index(id).is_some() {
@@ -83,7 +117,7 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
                 }
             }
             s.view.selection = id;
-            Ok(json!({ "selection": s.view.selection }))
+            Ok(json!({ "selection": s.view.selection, "selected": s.selected_ids() }))
         },
     },
     CommandSpec {

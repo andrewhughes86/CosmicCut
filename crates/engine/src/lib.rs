@@ -25,6 +25,7 @@ pub mod library;
 pub mod machine;
 pub mod model;
 pub mod op;
+pub mod outline;
 pub mod params;
 pub mod post;
 pub mod program;

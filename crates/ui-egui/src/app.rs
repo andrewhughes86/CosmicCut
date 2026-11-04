@@ -84,7 +84,8 @@ pub struct CosmicApp {
     /// An item being renamed from the explorer: (command, id, name typed so far).
     rename: Option<(String, String, String)>,
     /// A delete waiting to be confirmed: the command, its id and what it deletes.
-    confirm_delete: Option<(String, String, String)>,
+    /// Asking before a delete: the command, its parameters, and what it deletes.
+    confirm_delete: Option<(String, Value, String)>,
     shortcuts: Vec<(KeyboardShortcut, &'static str)>,
     automation: Automation,
     /// A window capture waiting: where, and whether to quit after.
@@ -404,7 +405,11 @@ impl CosmicApp {
             if id == "ui.rename" {
                 self.rename = Some((field("command"), field("id"), field("name")));
             } else {
-                self.confirm_delete = Some((field("command"), field("id"), field("label")));
+                let target = match params.get("ids") {
+                    Some(ids) => json!({ "ids": ids }),
+                    None => json!({ "id": field("id") }),
+                };
+                self.confirm_delete = Some((field("command"), target, field("label")));
             }
             return;
         }
@@ -416,14 +421,14 @@ impl CosmicApp {
         }
         if id == "shape.remove" && params.is_null() {
             match self.session.selected_shape() {
-                Some(s) => self.confirm_delete = Some((id.into(), s.id.clone(), s.name.clone())),
+                Some(s) => self.confirm_delete = Some((id.into(), json!({ "id": s.id }), s.name.clone())),
                 None => self.status = Some("select a shape first".into()),
             }
             return;
         }
         if id == "cut.remove" && params.is_null() {
             match self.session.selected_cut() {
-                Some(c) => self.confirm_delete = Some((id.into(), c.id.clone(), c.name.clone())),
+                Some(c) => self.confirm_delete = Some((id.into(), json!({ "id": c.id }), c.name.clone())),
                 None => self.status = Some("select a cut first".into()),
             }
             return;
@@ -585,6 +590,7 @@ impl CosmicApp {
                         ("machine", "Turntable, towers and wire"),
                         ("rulings", "Rulings across the foam"),
                         ("stock", "Stock"),
+                        ("origin", "Origin"),
                         ("grid", "Grid"),
                         ("view_cube", "View cube"),
                         ("readout", "Frame-rate readout"),
@@ -687,20 +693,40 @@ impl CosmicApp {
         }
         if let Some((command, target, label)) = self.confirm_delete.clone() {
             let mut open = true;
-            crate::ui_kit::Window::dialog("Delete").show(ctx, tokens, &mut open, |ui| {
-                ui.label(format!("Delete {label}?"));
-                if command == "shape.remove"
-                    && self.session.job.cuts.iter().any(|c| c.params.to_string().contains(&format!("\"{target}\"")))
-                {
+            crate::ui_kit::Alert::danger("Delete").show(ctx, tokens, &mut open, |ui| {
+                ui.label(RichText::new(format!("Delete {label}?")).size(18.0).strong().color(tokens.text));
+                ui.add_space(4.0);
+                ui.label(RichText::new("Undo (Ctrl+Z) brings it back.").color(tokens.text_muted));
+                let shapes: Vec<String> = match (target.get("id"), target.get("ids")) {
+                    (Some(Value::String(id)), _) => vec![id.clone()],
+                    (_, Some(Value::Array(a))) => a.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
+                    _ => Vec::new(),
+                };
+                let used = shapes.iter().filter(|id| id.starts_with("shape.")).any(|id| {
+                    self.session.job.cuts.iter().any(|c| c.params.to_string().contains(&format!("\"{id}\"")))
+                });
+                if used {
                     ui.label(RichText::new("Cuts that use it can no longer be made.").color(tokens.warning));
                 }
-                ui.add_space(10.0);
+                ui.add_space(16.0);
+                // Enter says yes.
+                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
                 ui.horizontal(|ui| {
-                    if ui.button("Delete").clicked() {
-                        requests.push((command.clone(), json!({ "id": target })));
+                    let delete = egui::Button::new(
+                        RichText::new("Delete")
+                            .size(15.0)
+                            .strong()
+                            .color(crate::ui_kit::ink_on(crate::ui_kit::alert_colour(tokens))),
+                    )
+                    .fill(crate::ui_kit::alert_colour(tokens))
+                    .min_size(vec2(110.0, 34.0));
+                    if ui.add(delete).on_hover_text("Enter").clicked() || enter {
+                        requests.push((command.clone(), target.clone()));
                         self.confirm_delete = None;
                     }
-                    if ui.button("Cancel").clicked() {
+                    ui.add_space(6.0);
+                    let cancel = egui::Button::new(RichText::new("Cancel").size(15.0)).min_size(vec2(110.0, 34.0));
+                    if ui.add(cancel).on_hover_text("Esc").clicked() {
                         self.confirm_delete = None;
                     }
                 });
@@ -819,7 +845,20 @@ impl eframe::App for CosmicApp {
         }
         self.viewport.pick_start = picking;
         self.viewport.face_pick = self.cut_panel.as_ref().and_then(|p| p.face_pick());
+        // While a profile's lines are picked, Delete leaves the selected ones out (it does not
+        // delete what the explorer has selected).
+        if let Some(panel) = self.cut_panel.as_mut().filter(|p| p.picking_lines)
+            && !ui.ctx().egui_wants_keyboard_input()
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Delete))
+        {
+            panel.delete_selected();
+        }
         self.viewport.line_pick = self.cut_panel.as_ref().and_then(|p| p.line_pick(&self.session));
+        self.viewport.ghost_models =
+            self.cut_panel.as_ref().is_some_and(|p| matches!(p.kind, CutKind::Profile | CutKind::TwoView));
+        // The cut being set up alone, its table turned to the angle it runs at.
+        self.viewport.cut_open = self.cut_panel.is_some();
+        self.viewport.cut_angle = self.cut_panel.as_ref().map(|p| p.view_angle());
 
         let mut cut_outcome: Option<(Option<Request>, bool)> = None;
         let mut stock_done = false;
@@ -898,10 +937,15 @@ impl eframe::App for CosmicApp {
         {
             panel.take_start(picked);
         }
-        if let Some(line) = self.viewport.picked_line.take()
+        if let Some((line, single)) = self.viewport.picked_line.take()
             && let Some(panel) = self.cut_panel.as_mut()
         {
-            panel.toggle_line(line);
+            panel.toggle_line(line, single);
+        }
+        if let Some(k) = self.viewport.picked_arrow.take()
+            && let Some(panel) = self.cut_panel.as_mut()
+        {
+            panel.flip_chain(k);
         }
         if std::mem::take(&mut self.viewport.stop_line_pick)
             && let Some(panel) = self.cut_panel.as_mut()

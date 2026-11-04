@@ -54,8 +54,9 @@ const BOTTOM: Param = Param::optional(
     "bottom",
     ParamKind::Choice(crate::cut::BOTTOMS),
     "attached (default): the wire comes in level with the part's bottom, goes over its top and out level on \
-     the other side, so the part stays joined to the foam under it and cannot move while the table turns. \
-     through: the wire goes right round the outline and the part comes loose straight away",
+     the other side, so the part stays joined to the foam under it and cannot move while the table turns; \
+     a model's bottom is never cut. through: the wire goes right round the outline and the part comes loose \
+     straight away",
 );
 const ATTACH: Param = Param::optional(
     "attach",
@@ -79,16 +80,62 @@ const START_X: Param = Param::optional(
 const START_Y: Param =
     Param::optional("start_y", ParamKind::Length { min: -100_000.0, max: 100_000.0 }, "Where the cut starts, up");
 
+const SOURCE: Param = Param::optional(
+    "source",
+    ParamKind::Choice(crate::cut::SOURCES),
+    "What the wire follows: a shape (default), or the outline of models seen along the wire",
+);
+const MODELS: Param = Param::optional(
+    "models",
+    ParamKind::StrList { max: 64 },
+    "With the source models: the models whose outline is cut, together (default every model)",
+);
+const SKIP: Param = Param::optional(
+    "skip",
+    ParamKind::IntList { max: 10_000 },
+    "Lines this cut leaves out (their ids; a later pass's ids start 100000 on); what is left is cut as it is",
+);
+const CHAINS: Param = Param::optional(
+    "chains",
+    ParamKind::Objects { max: crate::outline::MAX_CHAINS },
+    "The chains of the outline to cut, in order: a list of {\"lines\": [line ids in order], \"reverse\": bool}. \
+     Each is cut along its lines, or the other way with reverse. A later pass's line ids start 100000 on",
+);
+const LEAD_IN: Param = Param::optional(
+    "lead_in",
+    ParamKind::Length { min: 0.0, max: 10_000.0 },
+    "Length of the straight lead into each chain, along its start (default 0)",
+);
+const LEAD_OUT: Param = Param::optional(
+    "lead_out",
+    ParamKind::Length { min: 0.0, max: 10_000.0 },
+    "Length of the straight lead out of each chain, on past its end (default 0)",
+);
+const BOTTOM_LINES: Param = Param::optional(
+    "bottoms",
+    ParamKind::IntList { max: 10_000 },
+    "With the source models: lines along the models' bottoms to cut anyway (their ids); the others are left alone \
+     unless the bottom is cut through",
+);
+const BRIDGE: Param = Param::optional(
+    "bridge",
+    ParamKind::Bool,
+    "With the source models: where kept lines of two models end on the floor (machine Y0) next to each other, the \
+     wire runs along the floor from one to the next instead of leaving the foam (default yes)",
+);
+
 pub const PROFILE_PARAMS: &[Param] = &[
     ID,
     NAME,
-    Param::required("shape", ParamKind::Str, "The outline the wire follows, seen along the wire"),
-    Param::optional(
-        "skip",
-        ParamKind::IntList { max: 10_000 },
-        "Lines of the sketch this cut leaves out (their ids); what is left is cut as it is, from the end nearest the \
-         start point",
-    ),
+    SOURCE,
+    Param::optional("shape", ParamKind::Str, "The outline the wire follows, seen along the wire (source shape)"),
+    MODELS,
+    CHAINS,
+    SKIP,
+    BOTTOM_LINES,
+    BRIDGE,
+    LEAD_IN,
+    LEAD_OUT,
     Param::optional("angle", DEG, "Turntable angle (B) of the first pass, degrees (default 0)"),
     Param::optional(
         "copies",
@@ -131,8 +178,16 @@ pub const PROFILE_PARAMS: &[Param] = &[
 pub const TWOVIEW_PARAMS: &[Param] = &[
     ID,
     NAME,
-    Param::required("front", ParamKind::Str, "The shape seen from the front, at the turntable angle"),
-    Param::required("side", ParamKind::Str, "The shape seen from the side, a quarter turn on"),
+    SOURCE,
+    Param::optional("front", ParamKind::Str, "The shape seen from the front, at the turntable angle (source shape)"),
+    Param::optional("side", ParamKind::Str, "The shape seen from the side, a quarter turn on (source shape)"),
+    MODELS,
+    CHAINS,
+    SKIP,
+    BOTTOM_LINES,
+    BRIDGE,
+    LEAD_IN,
+    LEAD_OUT,
     Param::optional("angle", DEG, "Turntable angle of the front view, degrees"),
     Param::optional("anchor", ParamKind::Choice(ANCHORS), "Point of each shape that is placed"),
     Param::optional("scale", SCALE, "Scale factor of both shapes"),

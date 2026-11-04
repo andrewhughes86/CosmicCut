@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 
-use super::CommandSpec;
+use super::{CommandSpec, Param, ParamKind};
 use crate::error::{EngineError, EngineResult};
 use crate::session::{Clip, Session};
 
@@ -68,6 +68,47 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
             s.job.touch();
             s.sim = None;
             Ok(json!({ "cut": id }))
+        },
+    },
+    CommandSpec {
+        id: "edit.delete",
+        label: "Delete",
+        tooltip: "Delete the selected cuts, models and shapes, all in one step",
+        placement: None,
+        icon: None,
+        shortcut: None,
+        params: &[Param::optional(
+            "ids",
+            ParamKind::StrList { max: 10_000 },
+            "The cuts, models and shapes to delete (default everything selected)",
+        )],
+        returns: "{\"deleted\": [ids]}",
+        enabled: always,
+        run: |s, p| {
+            let ids: Vec<String> = match p.get("ids").and_then(Value::as_array) {
+                Some(a) => a.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
+                None => s.selected_ids(),
+            };
+            let mut deleted = Vec::new();
+            // Cuts first, then what they were made from.
+            for prefix in ["cut.", "model.", "shape."] {
+                for id in ids.iter().filter(|i| i.starts_with(prefix)) {
+                    let command = match prefix {
+                        "cut." => "cut.remove",
+                        "model." => "model.remove",
+                        _ => "shape.remove",
+                    };
+                    let spec = super::find(command).ok_or_else(|| EngineError::UnknownCommand(command.into()))?;
+                    (spec.run)(s, &json!({ "id": id }))?;
+                    deleted.push(id.clone());
+                }
+            }
+            if deleted.is_empty() {
+                return Err(EngineError::InvalidParams("select cuts, models or shapes to delete".into()));
+            }
+            s.view.selection = None;
+            s.view.selected.clear();
+            Ok(json!({ "deleted": deleted }))
         },
     },
     CommandSpec {

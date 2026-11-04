@@ -447,6 +447,141 @@ impl Voxels {
         out
     }
 
+    /// Removes every piece of material (cells joined face to face) that holds none of the cells
+    /// `keep` marks (as [`Voxels::part_cells`] gives them): loose waste falls away. Returns the
+    /// cells removed. With no cell marked, nothing goes.
+    pub fn drop_loose(&mut self, keep: &[bool]) -> usize {
+        let [nx, ny, nz] = self.dims;
+        let total = nx * ny * nz;
+        if keep.len() != total || !keep.iter().any(|k| *k) {
+            return 0;
+        }
+        let mut label = vec![usize::MAX; total];
+        let mut doomed: Vec<usize> = Vec::new();
+        let mut stack: Vec<usize> = Vec::new();
+        let mut piece: Vec<usize> = Vec::new();
+        for start in 0..total {
+            if label.get(start).is_none_or(|l| *l != usize::MAX) || self.value(start) <= 0 {
+                continue;
+            }
+            piece.clear();
+            stack.push(start);
+            if let Some(l) = label.get_mut(start) {
+                *l = start;
+            }
+            let mut holds_part = false;
+            while let Some(n) = stack.pop() {
+                piece.push(n);
+                holds_part |= keep.get(n).copied().unwrap_or(false);
+                let (i, j, k) = (n % nx, (n / nx) % ny, n / (nx * ny));
+                let around = [
+                    (i > 0).then(|| n - 1),
+                    (i + 1 < nx).then_some(n + 1),
+                    (j > 0).then(|| n - nx),
+                    (j + 1 < ny).then_some(n + nx),
+                    (k > 0).then(|| n - nx * ny),
+                    (k + 1 < nz).then_some(n + nx * ny),
+                ];
+                for m in around.into_iter().flatten() {
+                    if self.value(m) > 0 && label.get(m).is_some_and(|l| *l == usize::MAX) {
+                        if let Some(l) = label.get_mut(m) {
+                            *l = start;
+                        }
+                        stack.push(m);
+                    }
+                }
+            }
+            if !holds_part {
+                doomed.extend_from_slice(&piece);
+            }
+        }
+        let mut removed = 0;
+        for n in doomed {
+            removed += usize::from(self.lower(n, -127));
+        }
+        if removed > 0 {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        removed
+    }
+
+    /// The cells of material joined face to face to any of `seeds` (cell indices).
+    pub fn piece_of(&self, seeds: &[usize]) -> Vec<usize> {
+        let [nx, ny, nz] = self.dims;
+        let total = nx * ny * nz;
+        let mut seen = vec![false; total];
+        let mut stack: Vec<usize> = seeds.iter().copied().filter(|n| *n < total && self.value(*n) > 0).collect();
+        for n in &stack {
+            if let Some(s) = seen.get_mut(*n) {
+                *s = true;
+            }
+        }
+        let mut out = Vec::new();
+        while let Some(n) = stack.pop() {
+            out.push(n);
+            let (i, j, k) = (n % nx, (n / nx) % ny, n / (nx * ny));
+            let around = [
+                (i > 0).then(|| n - 1),
+                (i + 1 < nx).then_some(n + 1),
+                (j > 0).then(|| n - nx),
+                (j + 1 < ny).then_some(n + nx),
+                (k > 0).then(|| n - nx * ny),
+                (k + 1 < nz).then_some(n + nx * ny),
+            ];
+            for m in around.into_iter().flatten() {
+                if self.value(m) > 0 && seen.get(m).is_some_and(|s| !*s) {
+                    if let Some(s) = seen.get_mut(m) {
+                        *s = true;
+                    }
+                    stack.push(m);
+                }
+            }
+        }
+        out
+    }
+
+    /// The size in cells of each separate piece of material, largest first.
+    pub fn piece_sizes(&self) -> Vec<usize> {
+        let [nx, ny, nz] = self.dims;
+        let mut done = vec![false; nx * ny * nz];
+        let mut sizes = Vec::new();
+        for n in 0..done.len() {
+            if done.get(n).is_some_and(|d| *d) || self.value(n) <= 0 {
+                continue;
+            }
+            let piece = self.piece_of(&[n]);
+            for m in &piece {
+                if let Some(d) = done.get_mut(*m) {
+                    *d = true;
+                }
+            }
+            sizes.push(piece.len());
+        }
+        sizes.sort_unstable_by(|a, b| b.cmp(a));
+        sizes
+    }
+
+    /// The values of cells `cells`, to put back with [`Voxels::restore`].
+    pub fn values_of(&self, cells: &[usize]) -> Vec<i8> {
+        cells.iter().map(|n| self.value(*n)).collect()
+    }
+
+    /// Puts cells back as [`Voxels::values_of`] had them.
+    pub fn restore(&mut self, cells: &[usize], values: &[i8]) {
+        let mut changed = false;
+        for (n, v) in cells.iter().zip(values) {
+            if let Some(slot) = self.values.get_mut(*n)
+                && *slot != *v
+            {
+                *slot = *v;
+                changed = true;
+            }
+        }
+        if changed {
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
     /// For every cell, whether its centre is inside the closed mesh `tris` (world mm), by
     /// counting crossings of a vertical line through each column of cells.
     pub fn part_cells(&self, tris: &[Triangle]) -> Vec<bool> {
